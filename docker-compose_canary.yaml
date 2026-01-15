@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  web-server:
+    image: ${DOCKER_HUB_USER}/php-app:${BUILD_NUMBER}
+    deploy:
+      replicas: 1
+      labels:
+        - "traffic.weight=25"
+    ports:
+      - "8081:80"
+    environment:
+      - APP_ENV=canary
+      - DB_HOST=db
+    depends_on:
+      - db
+
+  db:
+    image: ${DOCKER_HUB_USER}/mysql-app:${BUILD_NUMBER}
+    deploy:
+      replicas: 1
+    environment:
+      - MYSQL_ROOT_PASSWORD=rootpassword
+      - MYSQL_DATABASE=appdb
