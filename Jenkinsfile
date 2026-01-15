@@ -5,8 +5,8 @@ pipeline {
     CANARY_APP_NAME = 'app-canary'
     DOCKER_HUB_USER = 'danil221'
     GIT_REPO = 'https://github.com/d-maksimov/crudapp.git'
-    BACKEND_IMAGE_NAME = 'danil221/php-app'
-    DATABASE_IMAGE_NAME = 'danil221/mysql-app'
+    BACKEND_IMAGE_NAME = 'php-app'
+    DATABASE_IMAGE_NAME = 'mysql-app'
     MANAGER_IP = '192.168.0.1'
   }
 
