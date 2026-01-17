@@ -8,17 +8,13 @@ services:
       MYSQL_DATABASE: appdb
       MYSQL_USER: user
       MYSQL_PASSWORD: userpassword
-    deploy:
-      replicas: 1
     volumes:
       - mysql-canary-data:/var/lib/mysql
 
-  web-server:
+  web-server:  # Canary использует web-server
     image: danil221/php-app:${BUILD_NUMBER}
     deploy:
       replicas: 1
-      labels:
-        - "traffic.weight=25"
     ports:
       - "8081:80"
     environment:
