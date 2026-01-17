@@ -1,8 +1,20 @@
 version: '3.8'
 
 services:
+  db:
+    image: danil221/mysql-app:${BUILD_NUMBER}
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: appdb
+      MYSQL_USER: user
+      MYSQL_PASSWORD: userpassword
+    deploy:
+      replicas: 1
+    volumes:
+      - mysql-canary-data:/var/lib/mysql
+
   web-server:
-    image: ${DOCKER_HUB_USER}/php-app:${BUILD_NUMBER}
+    image: danil221/php-app:${BUILD_NUMBER}
     deploy:
       replicas: 1
       labels:
@@ -10,15 +22,13 @@ services:
     ports:
       - "8081:80"
     environment:
-      - APP_ENV=canary
-      - DB_HOST=db
+      DB_HOST: db
+      DB_NAME: appdb
+      DB_USER: user
+      DB_PASSWORD: userpassword
+      APP_ENV: canary
     depends_on:
       - db
 
-  db:
-    image: ${DOCKER_HUB_USER}/mysql-app:${BUILD_NUMBER}
-    deploy:
-      replicas: 1
-    environment:
-      - MYSQL_ROOT_PASSWORD=rootpassword
-      - MYSQL_DATABASE=appdb
+volumes:
+  mysql-canary-data:

@@ -9,7 +9,7 @@ services:
   db:
     image: danil221/mysql-app:latest
     volumes:
-      - /shared/mysql:/var/lib/mysql  # ПРЯМОЙ ПУТЬ К ОБЩЕЙ ПАПКЕ НА ВСЕХ НОДАХ
+      - mysql-data:/var/lib/mysql
     environment:
       MYSQL_ROOT_PASSWORD: rootpassword
       MYSQL_DATABASE: appdb
@@ -21,14 +21,8 @@ services:
         condition: any
         delay: 10s
         max_attempts: 5
-      placement:
-        constraints:
-          - node.role != manager  # БД только на worker нодах
     ports:
-      - target: 3306
-        published: 3306
-        mode: ingress
-    # КРИТИЧЕСКИ ВАЖНЫЕ ПАРАМЕТРЫ ДЛЯ ОБЩЕЙ ПАПКИ
+      - "3306:3306"
     command: >
       --datadir=/var/lib/mysql
       --innodb-flush-method=O_DIRECT
@@ -54,19 +48,18 @@ services:
         condition: any
         delay: 5s
     ports:
-      - target: 80
-        published: 8080
-        mode: ingress
+      - "8080:80"
     environment:
       DB_HOST: db
       DB_NAME: appdb
-      DB_USER: root
-      DB_PASSWORD: rootpassword
+      DB_USER: user
+      DB_PASSWORD: userpassword
       DB_CONNECT_TIMEOUT: 60
     networks:
       - app-network
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
   phpmyadmin:
     image: phpmyadmin/phpmyadmin:5.2.1
@@ -77,14 +70,16 @@ services:
     environment:
       PMA_HOST: db
       PMA_PORT: 3306
-      PMA_USER: root
-      PMA_PASSWORD: rootpassword
+      PMA_USER: user
+      PMA_PASSWORD: userpassword
       UPLOAD_LIMIT: 100M
     ports:
-      - target: 80
-        published: 5000
-        mode: ingress
+      - "5000:80"
     networks:
       - app-network
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+
+volumes:
+  mysql-data:
