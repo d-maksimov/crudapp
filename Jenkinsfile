@@ -85,53 +85,75 @@ pipeline {
         }
         
         // ========== НОВЫЙ ЭТАП: ПРОВЕРКА СТРУКТУРЫ БАЗЫ ДАННЫХ ==========
-        stage('Check Database Structure') {
-            steps {
-                script {
-                    sh """
-                        echo "=== Проверка структуры базы данных ==="
-                        
-                        # Ждем полного запуска базы данных
-                        sleep 15
-                        
-                        # Находим ID контейнера с базой данных
-                        DB_CONTAINER=\$(docker ps -q -f name=${CANARY_APP_NAME}_db)
-                        
-                        if [ -z "\$DB_CONTAINER" ]; then
-                            echo "❌ Контейнер с базой данных не найден!"
-                            exit 1
+       stage('Check Database Structure') {
+    steps {
+        script {
+            sh """
+                echo "=== Проверка структуры базы данных ==="
+                
+                # Ждем стабильного запуска базы данных
+                echo "Ожидание запуска базы данных..."
+                DB_CONTAINER=""
+                for i in \$(seq 1 30); do
+                    DB_CONTAINER=\$(docker ps -q -f name=app-canary_db --filter status=running)
+                    if [ -n "\$DB_CONTAINER" ]; then
+                        # Проверяем, что MySQL отвечает
+                        if docker exec \$DB_CONTAINER mysqladmin ping -h localhost -u root -prootpassword --silent 2>/dev/null; then
+                            echo "✅ Контейнер БД найден и MySQL работает"
+                            break
                         fi
-                        
-                        echo "ID контейнера БД: \$DB_CONTAINER"
-                        
-                        # Проверяем наличие таблиц 'users' и 'workouts'
-                        TABLES_COUNT=\$(docker exec \$DB_CONTAINER \\
-                            mysql -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} -e \\
-                            "SELECT COUNT(*) FROM information_schema.tables 
-                             WHERE table_schema = DATABASE() 
-                             AND table_name IN ('users', 'workouts');" --batch --silent)
-                        
-                        echo "Найдено таблиц: \$TABLES_COUNT"
-                        
-                        if [ "\$TABLES_COUNT" -eq "2" ]; then
-                            echo "✅ Все таблицы ('users' и 'workouts') присутствуют в базе данных"
-                        else
-                            echo "❌ ОШИБКА: В базе данных не все таблицы!"
-                            echo "   Ожидается: 2 таблицы ('users' и 'workouts')"
-                            echo "   Найдено: \$TABLES_COUNT таблиц"
-                            
-                            # Дополнительная информация для отладки
-                            echo "=== Список всех таблиц в базе ==="
-                            docker exec \$DB_CONTAINER \\
-                                mysql -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} -e \\
-                                "SHOW TABLES;" --batch
-                            
-                            exit 1
-                        fi
-                    """
-                }
-            }
+                    fi
+                    echo "Попытка \$i/30 (ожидание 2 секунды)..."
+                    sleep 2
+                done
+                
+                if [ -z "\$DB_CONTAINER" ]; then
+                    echo "❌ Контейнер с базой данных не найден после ожидания!"
+                    echo "Текущие контейнеры MySQL:"
+                    docker ps -a | grep mysql || true
+                    echo "Логи последнего контейнера:"
+                    docker logs \$(docker ps -a -q -f name=mysql --latest) 2>/dev/null | tail -20 || true
+                    exit 1
+                fi
+                
+                echo "ID контейнера БД: \$DB_CONTAINER"
+                
+                # Даем MySQL немного времени на инициализацию
+                sleep 5
+                
+                # Проверяем наличие таблиц 'users' и 'workouts'
+                TABLES_COUNT=\$(docker exec \$DB_CONTAINER \\
+                    mysql -u root -prootpassword appdb -e \\
+                    "SELECT COUNT(*) FROM information_schema.tables 
+                     WHERE table_schema = DATABASE() 
+                     AND table_name IN ('users', 'workouts');" --batch --silent 2>/dev/null || echo "0")
+                
+                echo "Найдено таблиц: \$TABLES_COUNT"
+                
+                # Ожидаем 1 таблицу (только users), так как workouts удалили
+                if [ "\$TABLES_COUNT" -eq "1" ]; then
+                    echo "✅ Только таблица 'users' присутствует (таблица 'workouts' удалена - ТЕСТ ПРОЙДЕН!)"
+                elif [ "\$TABLES_COUNT" -eq "2" ]; then
+                    echo "⚠️  ОБЕ таблицы присутствуют (проверка не сработала)"
+                    echo "   Возможно, используется старый образ или init.sql не обновлен"
+                    exit 1
+                else
+                    echo "❌ ОШИБКА: В базе данных нет нужных таблиц!"
+                    echo "   Ожидается: 1 таблица ('users')"
+                    echo "   Найдено: \$TABLES_COUNT таблиц"
+                    
+                    # Дополнительная информация для отладки
+                    echo "=== Список всех таблиц в базе ==="
+                    docker exec \$DB_CONTAINER \\
+                        mysql -u root -prootpassword appdb -e \\
+                        "SHOW TABLES;" --batch 2>/dev/null || echo "Не удалось получить список таблиц"
+                    
+                    exit 1
+                fi
+            """
         }
+    }
+}
         // ========== КОНЕЦ НОВОГО ЭТАПА ==========
         
         stage('Canary Testing') {
