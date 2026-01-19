@@ -104,78 +104,85 @@ pipeline {
         }
         
         stage('Check Database Structure') {
-            steps {
-                script {
-                    echo '=== Проверка структуры базы данных ==='
+    steps {
+        script {
+            echo '=== Проверка структуры базы данных ==='
+            
+            // Ждём полного запуска БД
+            sleep 45
+            
+            // Проверяем через временный контейнер в сети canary
+            sh '''
+                echo "=== Проверка доступности canary БД через сеть ==="
+                
+                # 1. Проверяем что сервис запущен
+                SERVICE_STATUS=$(docker service ls --filter name=app-canary_db --format "{{.Replicas}}")
+                echo "Статус сервиса БД: $SERVICE_STATUS"
+                
+                if [ "$SERVICE_STATUS" != "1/1" ]; then
+                    echo "❌ Canary БД сервис не запущен. Статус: $SERVICE_STATUS"
+                    exit 1
+                fi
+                
+                # 2. Ждём доступности БД через сеть (ИСПРАВЛЕННЫЙ ЦИКЛ)
+                echo "Ожидание доступности БД (макс 60 секунд)..."
+                DB_READY=0
+                for i in $(seq 1 30); do
+                    echo "⏳ Попытка подключения $i/30..."
                     
-                    // Ждём полного запуска БД
-                    sleep 45
-                    
-                    // Проверяем через временный контейнер в сети canary
-                    sh '''
-                        echo "=== Проверка доступности canary БД через сеть ==="
-                        
-                        # 1. Проверяем что сервис запущен
-                        SERVICE_STATUS=$(docker service ls --filter name=app-canary_db --format "{{.Replicas}}")
-                        echo "Статус сервиса БД: $SERVICE_STATUS"
-                        
-                        if [ "$SERVICE_STATUS" != "1/1" ]; then
-                            echo "❌ Canary БД сервис не запущен. Статус: $SERVICE_STATUS"
-                            exit 1
-                        fi
-                        
-                        # 2. Ждём доступности БД через сеть
-                        echo "Ожидание доступности БД (макс 60 секунд)..."
-                        DB_READY=0
-                        for i in {1..30}; do
-                            if docker run --rm --network app-canary_default \
-                               mysql:8.0 mysql -h app-canary_db -u root -prootpassword -e "SELECT 1;" 2>/dev/null; then
-                                echo "✅ БД доступна на попытке $i"
-                                DB_READY=1
-                                break
-                            fi
-                            echo "⏳ Попытка подключения $i/30..."
-                            sleep 2
-                        done
-                        
-                        if [ $DB_READY -eq 0 ]; then
-                            echo "❌ Не удалось подключиться к БД за 60 секунд"
-                            echo "Проверка логов БД:"
-                            docker service logs app-canary_db --tail 10
-                            exit 1
-                        fi
-                        
-                        # 3. Проверяем структуру таблиц
-                        echo "Проверка структуры таблиц..."
-                        TABLES_COUNT=$(docker run --rm --network app-canary_default \
-                          mysql:8.0 mysql -h app-canary_db -u root -prootpassword appdb -e "
-                            SELECT COUNT(*) FROM information_schema.tables 
-                            WHERE table_schema = 'appdb' 
-                            AND table_name IN ('users', 'workouts');
-                          " --batch --silent 2>/dev/null || echo "ERROR")
-                        
-                        echo "Найдено таблиц: $TABLES_COUNT"
-                        
-                        # 4. Проверяем результат
-                        if [ "$TABLES_COUNT" = "ERROR" ] || [ -z "$TABLES_COUNT" ]; then
-                            echo "❌ Ошибка при проверке таблиц"
-                            exit 1
-                        elif [ "$TABLES_COUNT" -eq 2 ]; then
-                            echo "✅ Canary БД корректна (2 таблицы)"
-                        elif [ "$TABLES_COUNT" -eq 1 ]; then
-                            echo "❌ Canary БД повреждена (найдено таблиц: $TABLES_COUNT/2) - отсутствует одна таблица"
-                            exit 1
-                        elif [ "$TABLES_COUNT" -eq 0 ]; then
-                            echo "❌ Canary БД повреждена (найдено таблиц: $TABLES_COUNT/2) - таблицы не найдены"
-                            exit 1
-                        else
-                            echo "❌ Canary БД повреждена (найдено таблиц: $TABLES_COUNT/2)"
-                            exit 1
-                        fi
-                    '''
-                }
-            }
+                    if docker run --rm --network app-canary_default \
+                       mysql:8.0 mysql -h app-canary_db -u root -prootpassword -e "SELECT 1;" 2>/dev/null; then
+                        echo "✅ БД доступна на попытке $i"
+                        DB_READY=1
+                        break
+                    fi
+                    sleep 2
+                done
+                
+                if [ $DB_READY -eq 0 ]; then
+                    echo "❌ Не удалось подключиться к БД за 60 секунд"
+                    echo "Проверка состояния сервиса:"
+                    docker service ps app-canary_db --no-trunc
+                    echo "Проверка логов БД:"
+                    docker service logs app-canary_db --tail 20
+                    exit 1
+                fi
+                
+                # 3. Проверяем структуру таблиц
+                echo "Проверка структуры таблиц..."
+                TABLES_COUNT=$(docker run --rm --network app-canary_default \
+                  mysql:8.0 mysql -h app-canary_db -u root -prootpassword appdb -e "
+                    SELECT COUNT(*) FROM information_schema.tables 
+                    WHERE table_schema = 'appdb' 
+                    AND table_name IN ('users', 'workouts');
+                  " --batch --silent 2>/dev/null || echo "ERROR")
+                
+                echo "Найдено таблиц: $TABLES_COUNT"
+                
+                # 4. Проверяем результат
+                if [ "$TABLES_COUNT" = "ERROR" ] || [ -z "$TABLES_COUNT" ]; then
+                    echo "❌ Ошибка при проверке таблиц"
+                    echo "Возможные причины:"
+                    echo "1. Неправильное имя БД (ожидается: appdb)"
+                    echo "2. Неправильный пароль (ожидается: rootpassword)"
+                    echo "3. Таблицы не создались"
+                    exit 1
+                elif [ "$TABLES_COUNT" -eq 2 ]; then
+                    echo "✅ Canary БД корректна (2 таблицы)"
+                elif [ "$TABLES_COUNT" -eq 1 ]; then
+                    echo "❌ Canary БД повреждена (найдено таблиц: $TABLES_COUNT/2) - отсутствует одна таблица"
+                    exit 1
+                elif [ "$TABLES_COUNT" -eq 0 ]; then
+                    echo "❌ Canary БД повреждена (найдено таблиц: $TABLES_COUNT/2) - таблицы не найдены"
+                    exit 1
+                else
+                    echo "❌ Canary БД повреждена (найдено таблиц: $TABLES_COUNT/2)"
+                    exit 1
+                fi
+            '''
         }
+    }
+}
         
         stage('Canary Testing') {
             steps {
