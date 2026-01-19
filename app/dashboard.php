@@ -80,7 +80,7 @@ $workout_counts = array_values($workout_data);
 </head>
 <body>
     <header>
-        <h1>Привет, <?php echo htmlspecialchars($_SESSION['username']); ?>! Ваши тренировки</h1>
+        <h1>Привет, спортсмен - <?php echo htmlspecialchars($_SESSION['username']); ?>! Ваши тренировки</h1>
         <nav>
             <a href="index.php">Главная</a> | <a href="logout.php">Выйти</a>
         </nav>
