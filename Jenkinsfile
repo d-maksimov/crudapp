@@ -86,73 +86,46 @@ pipeline {
         
         // ========== НОВЫЙ ЭТАП: ПРОВЕРКА СТРУКТУРЫ БАЗЫ ДАННЫХ ==========
        stage('Check Database Structure') {
-    steps {
-        script {
-            sh '''
-                echo "=== Проверка структуры базы данных ==="
-                
-                # Даем время на запуск
-                sleep 30
-                
-                # Ищем контейнер canary БД (БЕЗ фильтра status=running)
-                DB_CONTAINER=$(docker ps -q -f name=app-canary_db)
-                
-                if [ -z "$DB_CONTAINER" ]; then
-                    echo "⚠️ Контейнер canary БД не найден"
-                    echo "Проверяем, есть ли вообще контейнеры с MySQL..."
-                    docker ps -a | grep mysql || true
-                    
-                    # Проверяем production БД для демонстрации
-                    echo "Проверяем production БД для демонстрации логики проверки:"
-                    PROD_CONTAINER=$(docker ps -q -f name=app_db)
-                    if [ -n "$PROD_CONTAINER" ]; then
-                        echo "Production БД: $PROD_CONTAINER"
-                        TABLES_COUNT=$(docker exec $PROD_CONTAINER \\
-                            mysql -u root -prootpassword appdb -e \\
-                            "SELECT COUNT(*) FROM information_schema.tables 
-                             WHERE table_schema = DATABASE() 
-                             AND table_name IN ('users', 'workouts');" --batch --silent 2>/dev/null || echo "0")
-                        
-                        echo "В production БД найдено таблиц: $TABLES_COUNT/2"
-                        
-                        if [ "$TABLES_COUNT" -eq 2 ]; then
-                            echo "✅ Production БД корректна (2 таблицы)"
-                        else
-                            echo "❌ Production БД неполная ($TABLES_COUNT/2 таблиц)"
-                        fi
-                    fi
-                    
-                    exit 1
-                fi
-                
-                echo "Контейнер canary БД найден: $DB_CONTAINER"
-                
-                # Проверяем таблицы
-                TABLES_COUNT=$(docker exec $DB_CONTAINER \\
-                    mysql -u root -prootpassword appdb -e \\
-                    "SELECT COUNT(*) FROM information_schema.tables 
-                     WHERE table_schema = DATABASE() 
-                     AND table_name IN ('users', 'workouts');" --batch --silent 2>/dev/null || echo "0")
-                
-                echo "Найдено таблиц в canary БД: $TABLES_COUNT/2"
-                
-                # ОЖИДАЕМ 1 таблицу (только users), так как workouts удалили из init.sql
-                if [ "$TABLES_COUNT" -eq "1" ]; then
-                    echo "❌ ОБНАРУЖЕНА ПРОБЛЕМА: Отсутствует таблица 'workouts'!"
-                    echo "   Canary БД содержит только 1 из 2 обязательных таблиц"
-                    echo "   -> Pipeline будет остановлен"
-                    echo "   -> Canary deployment будет откатан"
-                    exit 1
-                elif [ "$TABLES_COUNT" -eq "2" ]; then
-                    echo "✅ Canary БД корректна (2 таблицы)"
-                    echo "   -> Pipeline продолжит работу"
-                else
-                    echo "⚠️ Неожиданное количество таблиц: $TABLES_COUNT"
-                    exit 1
-                fi
-            '''
+  steps {
+    script {
+      echo '=== Проверка структуры базы данных ==='
+      
+      // Ждём, пока canary БД запустится
+      for (int i = 1; i <= 30; i++) {
+        def dbContainer = sh(script: 'docker ps -q -f name=app-canary_db', returnStdout: true).trim()
+        if (dbContainer) {
+          def health = sh(script: "docker inspect --format='{{.State.Health.Status}}' ${dbContainer} 2>/dev/null || echo 'unknown'", returnStdout: true).trim()
+          if (health == 'healthy') {
+            echo "✅ Canary БД запущена и здорова"
+            break
+          }
         }
+        echo "⏳ Ожидание canary БД (${i}/30)..."
+        sleep 5
+      }
+      
+      // Проверяем наличие контейнера
+      def dbContainer = sh(script: 'docker ps -q -f name=app-canary_db', returnStdout: true).trim()
+      if (!dbContainer) {
+        error '❌ Контейнер canary БД не найден — тест провален'
+      }
+      
+      // Проверяем структуру БД
+      def tablesCount = sh(script: """
+        docker exec ${dbContainer} mysql -u root -prootpassword appdb -e "
+          SELECT COUNT(*) FROM information_schema.tables 
+          WHERE table_schema = DATABASE() 
+          AND table_name IN ('users', 'workouts');
+        " --batch --silent
+      """, returnStdout: true).trim()
+      
+      if (tablesCount == '2') {
+        echo '✅ Canary БД корректна (2 таблицы)'
+      } else {
+        error "❌ Canary БД повреждена (найдено таблиц: ${tablesCount}/2)"
+      }
     }
+  }
 }
         // ========== КОНЕЦ НОВОГО ЭТАПА ==========
         
