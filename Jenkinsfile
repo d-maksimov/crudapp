@@ -11,8 +11,8 @@ pipeline {
         BACKEND_IMAGE_NAME = 'php-app'
         DATABASE_IMAGE_NAME = 'mysql-app'
         MANAGER_IP = '192.168.0.1'
-        MYSQL_ROOT_PASSWORD = 'rootpassword'  // Пароль из вашего Dockerfile
-        MYSQL_DATABASE = 'appdb'              // Имя БД из вашего Dockerfile
+        MYSQL_ROOT_PASSWORD = 'rootpassword'
+        MYSQL_DATABASE = 'appdb'
     }
     
     stages {
@@ -65,69 +65,128 @@ pipeline {
                 script {
                     sh """
                         echo "=== Развёртывание Canary (1 реплика) ==="
+                        
+                        # Удаляем старый стек если есть
+                        docker stack rm ${CANARY_APP_NAME} 2>/dev/null || true
+                        sleep 15
+                        
                         # Создаем временный файл с подставленными значениями
                         sed "s/\\\${BUILD_NUMBER}/${BUILD_NUMBER}/g" docker-compose_canary.yaml > docker-compose_canary_temp.yaml
                         sed -i "s/\\\${DOCKER_HUB_USER}/${DOCKER_HUB_USER}/g" docker-compose_canary_temp.yaml
                         
+                        # Проверяем что получилось
+                        echo "=== Проверка подстановки ==="
+                        grep "image:" docker-compose_canary_temp.yaml
+                        
                         # Разворачиваем canary
                         docker stack deploy -c docker-compose_canary_temp.yaml ${CANARY_APP_NAME} --with-registry-auth
                         
-                        echo "Ожидание запуска canary сервисов..."
-                        for i in \$(seq 1 15); do
-                            echo "Проверка \$i/15..."
+                        echo "Ожидание запуска canary сервисов (MySQL может запускаться до 90 секунд)..."
+                        for i in \$(seq 1 24); do  # 24 * 5 = 120 секунд
+                            echo "Проверка \$i/24..."
                             docker service ls --filter name=${CANARY_APP_NAME}
+                            
+                            # Проверяем что сервисы запущены
+                            RUNNING=\$(docker service ls --filter name=${CANARY_APP_NAME} --format "{{.Replicas}}" | grep -o "1/1" | wc -l)
+                            if [ "\$RUNNING" -eq 2 ]; then
+                                echo "✅ Оба canary сервиса запущены"
+                                break
+                            fi
+                            
                             sleep 5
                         done
-                        sleep 10
+                        
+                        echo "Дополнительное ожидание для healthcheck БД..."
+                        sleep 30
                     """
                 }
             }
         }
         
-        // ========== НОВЫЙ ЭТАП: ПРОВЕРКА СТРУКТУРЫ БАЗЫ ДАННЫХ ==========
-       stage('Check Database Structure') {
-  steps {
-    script {
-      echo '=== Проверка структуры базы данных ==='
-      
-      // Ждём, пока canary БД запустится
-      for (int i = 1; i <= 30; i++) {
-        def dbContainer = sh(script: 'docker ps -q -f name=app-canary_db', returnStdout: true).trim()
-        if (dbContainer) {
-          def health = sh(script: "docker inspect --format='{{.State.Health.Status}}' ${dbContainer} 2>/dev/null || echo 'unknown'", returnStdout: true).trim()
-          if (health == 'healthy') {
-            echo "✅ Canary БД запущена и здорова"
-            break
-          }
+        stage('Check Database Structure') {
+            steps {
+                script {
+                    echo '=== Проверка структуры базы данных ==='
+                    
+                    // ПРЯМОЙ ПОИСК CANARY КОНТЕЙНЕРА ПО СЕРВИСУ
+                    def dbContainer = sh(script: """
+                        # Ищем контейнер canary БД
+                        # Сначала по метке сервиса
+                        CONTAINER=\$(docker ps -q --filter "label=com.docker.swarm.service.name=${CANARY_APP_NAME}_db" 2>/dev/null | head -1)
+                        
+                        # Если не нашли, ищем по образу + имени canary
+                        if [ -z "\$CONTAINER" ]; then
+                            CONTAINER=\$(docker ps --format "{{.ID}}\t{{.Names}}" | grep -i "canary.*db\\|${CANARY_APP_NAME}.*db" | head -1 | cut -f1)
+                        fi
+                        
+                        # Если всё ещё не нашли, ищем по образу нового тега
+                        if [ -z "\$CONTAINER" ]; then
+                            CONTAINER=\$(docker ps -q --filter "ancestor=${DOCKER_HUB_USER}/${DATABASE_IMAGE_NAME}:${BUILD_NUMBER}" | head -1)
+                        fi
+                        
+                        echo "\$CONTAINER"
+                    """, returnStdout: true).trim()
+                    
+                    if (!dbContainer) {
+                        // Если контейнер не найден, ищем через сервис
+                        echo "Контейнер не найден напрямую, проверяем сервис..."
+                        def serviceStatus = sh(script: """
+                            docker service ls --filter name=${CANARY_APP_NAME}_db --format "{{.Replicas}}"
+                        """, returnStdout: true).trim()
+                        
+                        if (serviceStatus != "1/1") {
+                            error "❌ Canary БД не запущена. Статус сервиса: ${serviceStatus}"
+                        } else {
+                            error "❌ Canary БД сервис запущен, но контейнер не найден. Проверьте docker ps"
+                        }
+                    }
+                    
+                    echo "✅ Canary БД контейнер найден: ${dbContainer}"
+                    
+                    // Ждём пока БД станет healthy
+                    for (int i = 1; i <= 20; i++) {
+                        def health = sh(script: """
+                            docker inspect --format='{{.State.Health.Status}}' ${dbContainer} 2>/dev/null || echo 'unknown'
+                        """, returnStdout: true).trim()
+                        
+                        if (health == 'healthy') {
+                            echo "✅ Canary БД здорова"
+                            break
+                        } else if (health == 'unhealthy') {
+                            error "❌ Canary БД нездорова"
+                        }
+                        
+                        if (i == 20) {
+                            echo "⚠️ БД всё ещё не healthy, но продолжаем проверку..."
+                        } else {
+                            echo "⏳ Ожидание health БД (${i}/20)... Статус: ${health}"
+                            sleep 5
+                        }
+                    }
+                    
+                    // Проверяем структуру БД
+                    def tablesCount = sh(script: """
+                        docker exec ${dbContainer} mysql -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} -e "
+                            SELECT COUNT(*) FROM information_schema.tables 
+                            WHERE table_schema = DATABASE() 
+                            AND table_name IN ('users', 'workouts');
+                        " --batch --silent 2>/dev/null || echo "0"
+                    """, returnStdout: true).trim()
+                    
+                    echo "Найдено таблиц: ${tablesCount}"
+                    
+                    if (tablesCount == '2') {
+                        echo '✅ Canary БД корректна (2 таблицы)'
+                    } else if (tablesCount == '1') {
+                        error "❌ Canary БД повреждена (найдено таблиц: ${tablesCount}/2) - отсутствует одна таблица"
+                    } else if (tablesCount == '0') {
+                        error "❌ Canary БД повреждена (найдено таблиц: ${tablesCount}/2) - таблицы не найдены"
+                    } else {
+                        error "❌ Canary БД повреждена (найдено таблиц: ${tablesCount}/2)"
+                    }
+                }
+            }
         }
-        echo "⏳ Ожидание canary БД (${i}/30)..."
-        sleep 5
-      }
-      
-      // Проверяем наличие контейнера
-      def dbContainer = sh(script: 'docker ps -q -f name=app-canary_db', returnStdout: true).trim()
-      if (!dbContainer) {
-        error '❌ Контейнер canary БД не найден — тест провален'
-      }
-      
-      // Проверяем структуру БД
-      def tablesCount = sh(script: """
-        docker exec ${dbContainer} mysql -u root -prootpassword appdb -e "
-          SELECT COUNT(*) FROM information_schema.tables 
-          WHERE table_schema = DATABASE() 
-          AND table_name IN ('users', 'workouts');
-        " --batch --silent
-      """, returnStdout: true).trim()
-      
-      if (tablesCount == '2') {
-        echo '✅ Canary БД корректна (2 таблицы)'
-      } else {
-        error "❌ Canary БД повреждена (найдено таблиц: ${tablesCount}/2)"
-      }
-    }
-  }
-}
-        // ========== КОНЕЦ НОВОГО ЭТАПА ==========
         
         stage('Canary Testing') {
             steps {
