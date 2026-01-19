@@ -34,7 +34,7 @@ services:
           - node.role == manager
 
   web:
-    image: nginx:alpine
+    image: danil221/php-app:latest
     ports:
       - "80:80"
     networks:
