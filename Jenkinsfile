@@ -142,15 +142,15 @@ pipeline {
         }
         
         stage('Check Database Structure') {
-            steps {
-                script {
-                    sh '''
-                        echo "=== Проверка структуры базы данных ==="
-                        
-                        export DOCKER_HOST="tcp://192.168.0.1:2376"
-                        
-                        # SQL для проверки таблиц
-                        cat > /tmp/check_db.sql << "EOF"
+    steps {
+        script {
+            sh '''
+                echo "=== Проверка структуры базы данных ==="
+                
+                export DOCKER_HOST="tcp://192.168.0.1:2376"
+                
+                # SQL для проверки таблиц
+                cat > /tmp/check_db.sql << "EOF"
 -- Проверяем наличие таблиц
 SELECT 
     COUNT(CASE WHEN table_name = 'users' THEN 1 END) as has_users,
@@ -158,112 +158,139 @@ SELECT
 FROM information_schema.tables 
 WHERE table_schema = 'appdb';
 EOF
+                
+                echo "Проверка структуры БД canary..."
+                MAX_ATTEMPTS=8
+                
+                for ATTEMPT in $(seq 1 ${MAX_ATTEMPTS}); do
+                    echo "Попытка ${ATTEMPT} из ${MAX_ATTEMPTS}..."
+                    
+                    # Ищем контейнер БД по части имени
+                    echo "  Поиск контейнера БД..."
+                    DB_CONTAINER_ID=$(docker ps --format "{{.ID}}\t{{.Names}}" | grep "app-canary_db" | head -1 | awk '{print $1}')
+                    
+                    if [ -z "$DB_CONTAINER_ID" ]; then
+                        echo "  ❌ Контейнер БД не найден"
+                        echo "  Все контейнеры:"
+                        docker ps --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}" | head -10
+                        sleep 15
+                        continue
+                    fi
+                    
+                    echo "  ✅ Контейнер найден: $DB_CONTAINER_ID"
+                    
+                    # Проверяем статус контейнера
+                    CONTAINER_STATUS=$(docker inspect $DB_CONTAINER_ID --format "{{.State.Status}}" 2>/dev/null)
+                    echo "  Статус контейнера: $CONTAINER_STATUS"
+                    
+                    if [ "$CONTAINER_STATUS" != "running" ]; then
+                        echo "  ⚠️ Контейнер не в состоянии running"
+                        sleep 15
+                        continue
+                    fi
+                    
+                    # Проверяем, что MySQL внутри контейнера работает
+                    echo "  Проверка MySQL процесса..."
+                    if docker exec $DB_CONTAINER_ID mysqladmin ping -u root -prootpassword 2>/dev/null; then
+                        echo "  ✅ MySQL процесс работает"
                         
-                        # Увеличиваем количество попыток и время ожидания
-                        echo "Проверка структуры БД canary..."
-                        MAX_ATTEMPTS=10
+                        # Получаем имя сервиса для сетевого подключения
+                        SERVICE_NAME="app-canary_db"
                         
-                        for ATTEMPT in $(seq 1 ${MAX_ATTEMPTS}); do
-                            echo "Попытка ${ATTEMPT} из ${MAX_ATTEMPTS}..."
+                        # Теперь проверяем доступность по сети
+                        echo "  Проверка сетевого подключения..."
+                        if docker run --rm --network app-canary_default \
+                            mysql:8.0 mysql -h ${SERVICE_NAME} -u root -prootpassword \
+                            -e "SELECT 1;" --connect-timeout=20 2>/dev/null; then
                             
-                            # Сначала проверяем, что контейнер БД вообще доступен
-                            echo "  Проверка доступности контейнера БД..."
+                            echo "  ✅ Сетевое подключение установлено"
                             
-                            # Получаем ID контейнера БД
-                            DB_CONTAINER_ID=$(docker ps --filter "name=app-canary_db" --format "{{.ID}}" | head -1)
+                            # Проверяем таблицы
+                            echo "  Проверка структуры таблиц..."
+                            RESULT=$(docker run --rm --network app-canary_default \
+                                -v /tmp/check_db.sql:/tmp/check_db.sql \
+                                mysql:8.0 mysql -h ${SERVICE_NAME} -u root -prootpassword appdb \
+                                -e "source /tmp/check_db.sql" --batch --silent 2>/dev/null || echo "0 0")
                             
-                            if [ -z "$DB_CONTAINER_ID" ]; then
-                                echo "  ❌ Контейнер БД не найден"
-                                echo "  Все контейнеры:"
-                                docker ps --format "table {{.ID}}\t{{.Names}}\t{{.Status}}" | head -10
-                                sleep 20
-                                continue
-                            fi
+                            HAS_USERS=$(echo $RESULT | awk "{print \$1}")
+                            HAS_WORKOUTS=$(echo $RESULT | awk "{print \$2}")
                             
-                            echo "  ✅ Контейнер найден: $DB_CONTAINER_ID"
+                            echo "  Результат проверки:"
+                            echo "    Таблица 'users': $HAS_USERS"
+                            echo "    Таблица 'workouts': $HAS_WORKOUTS"
                             
-                            # Проверяем статус контейнера
-                            CONTAINER_STATUS=$(docker inspect $DB_CONTAINER_ID --format "{{.State.Status}}" 2>/dev/null)
-                            echo "  Статус контейнера: $CONTAINER_STATUS"
-                            
-                            # Проверяем, запущен ли MySQL процесс внутри контейнера
-                            echo "  Проверка MySQL процесса в контейнере..."
-                            if docker exec $DB_CONTAINER_ID mysqladmin ping -u root -prootpassword 2>/dev/null; then
-                                echo "  ✅ MySQL процесс работает"
+                            if [ "$HAS_USERS" = "1" ] && [ "$HAS_WORKOUTS" = "1" ]; then
+                                echo "✅ Структура БД корректна"
+                                echo "✅ Таблицы 'users' и 'workouts' созданы успешно"
                                 
-                                # Теперь проверяем доступность по сети
-                                echo "  Проверка сетевого подключения..."
-                                if docker run --rm --network app-canary_default \
-                                    mysql:8.0 mysql -h app-canary_db -u root -prootpassword \
-                                    -e "SELECT 1;" --connect-timeout=30 2>/dev/null; then
-                                    
-                                    echo "  ✅ Сетевое подключение установлено"
-                                    
-                                    # Проверяем таблицы
-                                    RESULT=$(docker run --rm --network app-canary_default \
-                                        -v /tmp/check_db.sql:/tmp/check_db.sql \
-                                        mysql:8.0 mysql -h app-canary_db -u root -prootpassword appdb \
-                                        -e "source /tmp/check_db.sql" --batch --silent 2>/dev/null || echo "0 0")
-                                    
-                                    HAS_USERS=$(echo $RESULT | awk "{print \$1}")
-                                    HAS_WORKOUTS=$(echo $RESULT | awk "{print \$2}")
-                                    
-                                    echo "  Результат проверки:"
-                                    echo "    Таблица 'users': $HAS_USERS"
-                                    echo "    Таблица 'workouts': $HAS_WORKOUTS"
-                                    
-                                    if [ "$HAS_USERS" = "1" ] && [ "$HAS_WORKOUTS" = "1" ]; then
-                                        echo "✅ Структура БД корректна"
-                                        echo "  Таблицы 'users' и 'workouts' созданы успешно"
-                                        
-                                        # Дополнительная проверка - количество записей
-                                        echo "  Проверка тестовых данных..."
-                                        DATA_CHECK=$(docker run --rm --network app-canary_default \
-                                            mysql:8.0 mysql -h app-canary_db -u root -prootpassword appdb \
-                                            -e "SELECT COUNT(*) as user_count FROM users; SELECT COUNT(*) as workout_count FROM workouts;" --batch --silent 2>/dev/null)
-                                        
-                                        USER_COUNT=$(echo "$DATA_CHECK" | head -1)
-                                        WORKOUT_COUNT=$(echo "$DATA_CHECK" | tail -1)
-                                        
-                                        echo "    Пользователей: $USER_COUNT"
-                                        echo "    Тренировок: $WORKOUT_COUNT"
-                                        
-                                        rm -f /tmp/check_db.sql
-                                        exit 0
-                                    else
-                                        echo "❌ Проблема со структурой БД"
-                                        echo "  Проверьте init.sql файл"
-                                        echo "  Содержимое БД:"
-                                        docker run --rm --network app-canary_default \
-                                            mysql:8.0 mysql -h app-canary_db -u root -prootpassword \
-                                            -e "SHOW DATABASES; USE appdb; SHOW TABLES;" 2>/dev/null || true
-                                        rm -f /tmp/check_db.sql
-                                        exit 1
-                                    fi
-                                else
-                                    echo "  ⚠️ Нет сетевого подключения к БД"
+                                # Дополнительная проверка данных
+                                echo "  Проверка тестовых данных..."
+                                DATA_CHECK=$(docker run --rm --network app-canary_default \
+                                    mysql:8.0 mysql -h ${SERVICE_NAME} -u root -prootpassword appdb \
+                                    -e "SELECT COUNT(*) as user_count FROM users; SELECT COUNT(*) as workout_count FROM workouts;" --batch --silent 2>/dev/null)
+                                
+                                if [ ! -z "$DATA_CHECK" ]; then
+                                    USER_COUNT=$(echo "$DATA_CHECK" | head -1)
+                                    WORKOUT_COUNT=$(echo "$DATA_CHECK" | tail -1)
+                                    echo "    Пользователей: $USER_COUNT"
+                                    echo "    Тренировок: $WORKOUT_COUNT"
                                 fi
+                                
+                                rm -f /tmp/check_db.sql
+                                exit 0
                             else
-                                echo "  ⚠️ MySQL процесс не готов"
+                                echo "❌ Проблема со структурой БД"
+                                echo "  Проверьте init.sql файл"
+                                
+                                # Дополнительная диагностика
+                                echo "  Список баз данных:"
+                                docker run --rm --network app-canary_default \
+                                    mysql:8.0 mysql -h ${SERVICE_NAME} -u root -prootpassword \
+                                    -e "SHOW DATABASES;" 2>/dev/null || true
+                                    
+                                echo "  Список таблиц в appdb:"
+                                docker run --rm --network app-canary_default \
+                                    mysql:8.0 mysql -h ${SERVICE_NAME} -u root -prootpassword appdb \
+                                    -e "SHOW TABLES;" 2>/dev/null || true
+                                    
+                                rm -f /tmp/check_db.sql
+                                exit 1
                             fi
+                        else
+                            echo "  ⚠️ Нет сетевого подключения к БД"
+                            echo "  Сеть: app-canary_default"
+                            echo "  Имя хоста: ${SERVICE_NAME}"
                             
-                            # Если не удалось, ждем дольше для следующих попыток
-                            WAIT_TIME=$((ATTEMPT * 15))
-                            echo "  ⏳ Ждем ${WAIT_TIME} секунд перед следующей попыткой..."
-                            sleep ${WAIT_TIME}
-                        done
-                        
-                        echo "❌ Не удалось проверить структуру БД после ${MAX_ATTEMPTS} попыток"
-                        echo "  Проверьте логи БД:"
-                        docker service logs app-canary_db --tail 30 2>/dev/null || true
-                        
-                        rm -f /tmp/check_db.sql
-                        exit 1
-                    '''
-                }
-            }
+                            # Проверяем сеть
+                            echo "  Проверка сети..."
+                            docker network inspect app-canary_default --format "{{range .Containers}}{{.Name}} {{end}}" 2>/dev/null || true
+                        fi
+                    else
+                        echo "  ⚠️ MySQL процесс не готов"
+                        # Проверяем логи контейнера
+                        echo "  Последние логи контейнера:"
+                        docker logs $DB_CONTAINER_ID --tail 5 2>/dev/null || true
+                    fi
+                    
+                    # Если не удалось, ждем перед следующей попыткой
+                    WAIT_TIME=$((ATTEMPT * 10))
+                    echo "  ⏳ Ждем ${WAIT_TIME} секунд перед следующей попыткой..."
+                    sleep ${WAIT_TIME}
+                done
+                
+                echo "❌ Не удалось проверить структуру БД после ${MAX_ATTEMPTS} попыток"
+                echo "  Проверьте логи БД:"
+                docker service logs app-canary_db --tail 30 2>/dev/null || true
+                
+                echo "  Все контейнеры:"
+                docker ps --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}" | head -15
+                
+                rm -f /tmp/check_db.sql
+                exit 1
+            '''
         }
-        
+    }
+}
         stage('Canary Testing') {
             steps {
                 script {
