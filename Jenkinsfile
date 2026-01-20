@@ -104,7 +104,7 @@ pipeline {
             }
         }
         
-        stage('Check Database Structure') {
+       stage('Check Database Structure') {
     steps {
         script {
             echo '=== Проверка таблиц базы данных ==='
@@ -114,41 +114,63 @@ pipeline {
             sh '''
                 echo "Проверка наличия таблиц 'users' и 'workouts'..."
                 
-                # 1. Находим контейнер БД по сервису или другим признакам
-                # Способ 1: Ищем контейнер с образом mysql-app
-                CONTAINER_ID=$(docker ps --filter "ancestor=danil221/mysql-app" --format "{{.ID}}" | head -1)
+                # 1. Ищем контейнер с ТЕКУЩИМ образом (с номером сборки)
+                CURRENT_IMAGE="danil221/mysql-app:${BUILD_NUMBER}"
+                echo "Ищем контейнер с образом: $CURRENT_IMAGE"
                 
-                # Способ 2: Если не нашли, ищем по лейблу сервиса
+                CONTAINER_ID=$(docker ps --filter "ancestor=$CURRENT_IMAGE" --format "{{.ID}}" | head -1)
+                
+                # 2. Если не нашли, ищем контейнер из стека app-canary
                 if [ -z "$CONTAINER_ID" ]; then
-                    CONTAINER_ID=$(docker ps --filter "label=com.docker.stack.namespace=app-canary" --filter "label=com.docker.swarm.service.name=app-canary_db" --format "{{.ID}}" | head -1)
+                    echo "Ищем контейнер в стеке app-canary..."
+                    CONTAINER_ID=$(docker ps --filter "name=app-canary" --format "{{.ID}}" | head -1)
                 fi
                 
-                # Способ 3: Если все еще не нашли, ищем любой mysql контейнер
+                # 3. Если все еще не нашли, показываем все контейнеры и ищем mysql
                 if [ -z "$CONTAINER_ID" ]; then
-                    CONTAINER_ID=$(docker ps --filter "name=mysql" --format "{{.ID}}" | head -1)
+                    echo "=== Все контейнеры ==="
+                    docker ps --format "table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}"
+                    
+                    # Ищем любой mysql контейнер (последний запущенный)
+                    CONTAINER_ID=$(docker ps --filter "ancestor=danil221/mysql-app" --format "{{.ID}}" | head -1)
                 fi
                 
                 if [ -z "$CONTAINER_ID" ]; then
                     echo "❌ Контейнер БД не найден"
-                    echo "Список всех контейнеров:"
-                    docker ps --format "table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}"
+                    echo "Ожидался образ: $CURRENT_IMAGE"
+                    echo "Доступные MySQL контейнеры:"
+                    docker ps --filter "ancestor=mysql" --format "table {{.ID}}\t{{.Names}}\t{{.Image}}"
                     exit 1
                 fi
                 
-                echo "Найден контейнер БД: $CONTAINER_ID"
-                echo "Информация о контейнере:"
-                docker inspect $CONTAINER_ID --format "{{.Name}} {{.Config.Image}} {{.State.Status}}"
+                CONTAINER_NAME=$(docker inspect --format '{{.Name}}' $CONTAINER_ID)
+                CONTAINER_IMAGE=$(docker inspect --format '{{.Config.Image}}' $CONTAINER_ID)
                 
-                # 2. Проверяем подключение к БД
+                echo "Найден контейнер: $CONTAINER_NAME"
+                echo "Образ: $CONTAINER_IMAGE"
+                echo "Статус: $(docker inspect --format '{{.State.Status}}' $CONTAINER_ID)"
+                
+                # 4. Проверяем подключение к БД
                 echo "Проверка подключения к БД..."
-                if ! docker exec $CONTAINER_ID mysql -u root -prootpassword -e "SELECT 1;" 2>/dev/null; then
-                    echo "❌ Не удалось подключиться к БД"
-                    echo "Логи контейнера:"
-                    docker logs $CONTAINER_ID --tail 20
-                    exit 1
-                fi
+                MAX_RETRIES=15
+                for i in $(seq 1 $MAX_RETRIES); do
+                    if docker exec $CONTAINER_ID mysql -u root -prootpassword -e "SELECT 1;" 2>/dev/null; then
+                        echo "✅ Успешное подключение к БД (попытка $i/$MAX_RETRIES)"
+                        break
+                    fi
+                    
+                    if [ $i -eq $MAX_RETRIES ]; then
+                        echo "❌ Не удалось подключиться к БД после $MAX_RETRIES попыток"
+                        echo "Логи контейнера:"
+                        docker logs $CONTAINER_ID --tail 30
+                        exit 1
+                    fi
+                    
+                    echo "⏳ Ожидание готовности БД ($i/$MAX_RETRIES)..."
+                    sleep 4
+                done
                 
-                # 3. Проверяем наличие базы данных appdb
+                # 5. Проверяем наличие базы данных appdb
                 echo "Проверка наличия базы данных 'appdb'..."
                 if docker exec $CONTAINER_ID mysql -u root -prootpassword -e "SHOW DATABASES;" 2>/dev/null | grep -q "appdb"; then
                     echo "✅ База данных 'appdb' существует"
@@ -157,61 +179,50 @@ pipeline {
                     exit 1
                 fi
                 
-                # 4. Проверяем наличие обеих таблиц за один запрос
+                # 6. Проверяем наличие обеих таблиц
                 echo "Проверка наличия таблиц 'users' и 'workouts'..."
                 
-                TABLE_CHECK=$(docker exec $CONTAINER_ID mysql -u root -prootpassword appdb -e "
-                    SELECT 
-                        SUM(CASE WHEN table_name = 'users' THEN 1 ELSE 0 END) as has_users,
-                        SUM(CASE WHEN table_name = 'workouts' THEN 1 ELSE 0 END) as has_workouts
-                    FROM information_schema.tables 
-                    WHERE table_schema = 'appdb' 
-                    AND table_name IN ('users', 'workouts');
-                " --batch --silent 2>/dev/null || echo "0 0")
+                # Получаем список всех таблиц
+                TABLES_LIST=$(docker exec $CONTAINER_ID mysql -u root -prootpassword appdb -e "SHOW TABLES;" --batch --silent 2>/dev/null || echo "")
                 
-                HAS_USERS=$(echo $TABLE_CHECK | awk '{print $1}')
-                HAS_WORKOUTS=$(echo $TABLE_CHECK | awk '{print $2}')
+                echo "Все таблицы в БД appdb:"
+                echo "$TABLES_LIST" | while read table; do echo "  - $table"; done
                 
-                echo "Таблица 'users': $HAS_USERS (1 = есть, 0 = нет)"
-                echo "Таблица 'workouts': $HAS_WORKOUTS (1 = есть, 0 = нет)"
+                # Проверяем наличие конкретных таблиц
+                HAS_USERS=$(echo "$TABLES_LIST" | grep -c "^users$" || true)
+                HAS_WORKOUTS=$(echo "$TABLES_LIST" | grep -c "^workouts$" || true)
                 
-                if [ "$HAS_USERS" = "1" ] && [ "$HAS_WORKOUTS" = "1" ]; then
+                echo "Таблица 'users': $([ "$HAS_USERS" -eq 1 ] && echo "НАЙДЕНА" || echo "НЕ НАЙДЕНА")"
+                echo "Таблица 'workouts': $([ "$HAS_WORKOUTS" -eq 1 ] && echo "НАЙДЕНА" || echo "НЕ НАЙДЕНА")"
+                
+                # 7. Детальная проверка
+                if [ "$HAS_USERS" -eq 1 ] && [ "$HAS_WORKOUTS" -eq 1 ]; then
                     echo "✅ Обе таблицы существуют: users и workouts"
+                    
+                    # Проверяем структуру
+                    echo "Структура таблицы 'users':"
+                    docker exec $CONTAINER_ID mysql -u root -prootpassword appdb -e "DESCRIBE users;" 2>/dev/null || echo "Не удалось получить структуру"
+                    
+                    echo "Структура таблицы 'workouts':"
+                    docker exec $CONTAINER_ID mysql -u root -prootpassword appdb -e "DESCRIBE workouts;" 2>/dev/null || echo "Не удалось получить структуру"
+                    
                     echo "✅ Структура БД корректна"
                     
-                    # 5. Дополнительная проверка: количество записей
-                    echo "Проверка тестовых данных..."
-                    
-                    USERS_COUNT=$(docker exec $CONTAINER_ID mysql -u root -prootpassword appdb -e "
-                        SELECT COUNT(*) FROM users;
-                    " --batch --silent 2>/dev/null || echo "0")
-                    
-                    WORKOUTS_COUNT=$(docker exec $CONTAINER_ID mysql -u root -prootpassword appdb -e "
-                        SELECT COUNT(*) FROM workouts;
-                    " --batch --silent 2>/dev/null || echo "0")
-                    
-                    echo "Записей в таблице 'users': $USERS_COUNT"
-                    echo "Записей в таблице 'workouts': $WORKOUTS_COUNT"
-                    
-                    if [ "$USERS_COUNT" -gt 0 ] && [ "$WORKOUTS_COUNT" -gt 0 ]; then
-                        echo "✅ Тестовые данные присутствуют"
-                    else
-                        echo "⚠️ Мало или нет тестовых данных"
-                    fi
-                    
-                elif [ "$HAS_USERS" = "1" ] && [ "$HAS_WORKOUTS" = "0" ]; then
+                elif [ "$HAS_USERS" -eq 1 ] && [ "$HAS_WORKOUTS" -eq 0 ]; then
                     echo "❌ ОШИБКА: Отсутствует таблица 'workouts'"
-                    echo "Проверьте init.sql файл"
+                    echo "Проверьте init.sql файл - таблица workouts должна быть создана"
                     exit 1
-                elif [ "$HAS_USERS" = "0" ] && [ "$HAS_WORKOUTS" = "1" ]; then
+                elif [ "$HAS_USERS" -eq 0 ] && [ "$HAS_WORKOUTS" -eq 1 ]; then
                     echo "❌ ОШИБКА: Отсутствует таблица 'users'"
-                    echo "Проверьте init.sql файл"
+                    echo "Проверьте init.sql файл - таблица users должна быть создана"
                     exit 1
                 else
-                    echo "❌ ОШИБКА: Отсутствуют обе таблицы"
-                    echo "Проверьте init.sql файл"
+                    echo "❌ ОШИБКА: Отсутствуют обе таблицы: users и workouts"
+                    echo "Проверьте init.sql файл - должны быть созданы обе таблицы"
                     exit 1
                 fi
+                
+                echo "✅ Проверка БД завершена успешно"
             '''
         }
     }
