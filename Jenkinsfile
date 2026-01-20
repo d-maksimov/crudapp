@@ -142,29 +142,60 @@ pipeline {
         }
         
         stage('Check Database Structure') {
-            steps {
-                script {
-                    sh '''
-                        echo "=== ПРОПУСК ПРОВЕРКИ БД - ПРОВЕРКА РАБОТОСПОСОБНОСТИ ==="
-                        
-                        export DOCKER_HOST="tcp://192.168.0.1:2376"
-                        
-                        echo "⚠️ ВРЕМЕННО ПРОПУСКАЕМ ПРОВЕРКУ СТРУКТУРЫ БД"
-                        echo "Причина: Контейнеры запущены на другом узле Swarm (worker2)"
-                        echo ""
-                        echo "Проверяем, что сервисы запущены:"
-                        docker service ls --filter name=app-canary
-                        echo ""
-                        echo "Проверяем логи БД - они показывают успешную инициализацию:"
-                        docker service logs app-canary_db --tail 3
-                        echo ""
-                        echo "✅ Для продолжения пайплайна пропускаем проверку структуры БД"
-                        echo "⚠️ В реальном проекте нужно настроить кросс-нодовую проверку"
-                    '''
-                }
-            }
+    steps {
+        script {
+            sh """
+                echo "=== Проверка структуры БД Canary ==="
+
+                export DOCKER_HOST="${DOCKER_HOST}"
+
+                echo "1. Проверяем, что сервис БД запущен..."
+                docker service ls --filter name=${CANARY_APP_NAME}_db
+
+                echo "2. Проверяем наличие таблиц users и workouts..."
+
+                # Запускаем временный mysql-клиент в overlay-сети canary
+                TABLE_COUNT=\$(docker run --rm \\
+                    --network ${CANARY_APP_NAME}_default \\
+                    mysql:8.0 \\
+                    mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} \\
+                    -N -e "SELECT COUNT(*) FROM information_schema.tables 
+                           WHERE table_schema='${MYSQL_DATABASE}'
+                           AND table_name IN ('users','workouts');" \
+                    2>/dev/null || echo "ERROR")
+
+                if [ "\$TABLE_COUNT" = "ERROR" ]; then
+                    echo "❌ Ошибка подключения к БД"
+                    exit 1
+                fi
+
+                echo "Найдено таблиц: \$TABLE_COUNT"
+
+                if [ "\$TABLE_COUNT" -ne 2 ]; then
+                    echo "❌ Структура БД некорректна"
+                    echo "Ожидались таблицы: users, workouts"
+
+                    echo ""
+                    echo "Фактически найдено:"
+                    docker run --rm \\
+                        --network ${CANARY_APP_NAME}_default \\
+                        mysql:8.0 \\
+                        mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} \\
+                        -e "SHOW TABLES;" 2>/dev/null || true
+
+                    exit 1
+                fi
+
+                echo "✅ Структура БД корректна (users + workouts присутствуют)"
+
+                echo ""
+                echo "3. Логи БД (информационно):"
+                docker service logs ${CANARY_APP_NAME}_db --tail 5 2>/dev/null || true
+            """
         }
-        
+    }
+}
+
         stage('Canary Testing') {
             steps {
                 script {
