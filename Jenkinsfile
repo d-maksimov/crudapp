@@ -13,7 +13,7 @@ pipeline {
         MANAGER_IP = '192.168.0.1'
         MYSQL_ROOT_PASSWORD = 'rootpassword'
         MYSQL_DATABASE = 'appdb'
-        DOCKER_HOST = 'tcp://localhost:2376'
+        DOCKER_HOST = 'tcp://192.168.0.1:2376'
     }
     
     stages {
