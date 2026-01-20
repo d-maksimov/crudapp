@@ -140,110 +140,41 @@ pipeline {
                 }
             }
         }
-       stage('Check Database Structure') {
-    steps {
-        script {
-            sh '''
-                echo "=== ПРОПУСК ПРОВЕРКИ БД - ПРОВЕРКА РАБОТОСПОСОБНОСТИ ==="
-                
-                export DOCKER_HOST="tcp://192.168.0.1:2376"
-                
-                echo "⚠️ ВРЕМЕННО ПРОПУСКАЕМ ПРОВЕРКУ СТРУКТУРЫ БД"
-                echo "Причина: Контейнеры запущены на другом узле Swarm (worker2)"
-                echo ""
-                echo "Проверяем, что сервисы запущены:"
-                docker service ls --filter name=app-canary
-                echo ""
-                echo "Проверяем логи БД - они показывают успешную инициализацию:"
-                docker service logs app-canary_db --tail 3
-                echo ""
-                echo "✅ Для продолжения пайплайна пропускаем проверку структуры БД"
-                echo "⚠️ В реальном проекте нужно настроить кросс-нодовую проверку"
-            '''
-        }
-    }
-}
-
-stage('Canary Testing') {
-    steps {
-        script {
-            sh '''
-                echo "=== Тестирование Canary (порт 8081) ==="
-                
-                export DOCKER_HOST="tcp://192.168.0.1:2376"
-                
-                echo "Даем дополнительное время для запуска PHP..."
-                sleep 30
-                
-                SUCCESS=0
-                TOTAL_TESTS=5
-                CANARY_URL="http://192.168.0.1:8081"
-                
-                echo "Тестирование canary по адресу: ${CANARY_URL}"
-                
-                for i in 1 2 3 4 5; do
-                    echo ""
-                    echo "Тест $i/${TOTAL_TESTS}:"
-                    
-                    # Пробуем получить главную страницу
-                    if curl -f -s --max-time 30 ${CANARY_URL} > /tmp/canary_test_${i}.html 2>/dev/null; then
-                        SIZE=$(wc -c < /tmp/canary_test_${i}.html)
-                        echo "  ✓ Страница загружена (${SIZE} байт)"
+        
+        stage('Check Database Structure') {
+            steps {
+                script {
+                    sh '''
+                        echo "=== ПРОПУСК ПРОВЕРКИ БД - ПРОВЕРКА РАБОТОСПОСОБНОСТИ ==="
                         
-                        # Проверяем на наличие ошибок
-                        ERROR_PATTERN="error|fatal|exception|failed|syntax|warning"
-                        if ! grep -q -i "${ERROR_PATTERN}" /tmp/canary_test_${i}.html 2>/dev/null; then
-                            SUCCESS=$((SUCCESS + 1))
-                            echo "  ✓ Контент без ошибок"
-                        else
-                            echo "  ⚠️ Найдены ошибки в контенте"
-                            grep -i "${ERROR_PATTERN}" /tmp/canary_test_${i}.html 2>/dev/null | head -3
-                        fi
-                    else
-                        CURL_EXIT=$?
-                        echo "  ❌ Не удалось загрузить страницу (код: ${CURL_EXIT})"
-                        echo "  Проверяем доступность порта..."
-                        timeout 5 nc -z 192.168.0.1 8081 && echo "  Порт 8081 открыт" || echo "  Порт 8081 закрыт"
-                    fi
-                    
-                    sleep 5
-                done
-                
-                echo ""
-                echo "=== Результаты тестирования Canary ==="
-                echo "Успешных тестов: ${SUCCESS}/${TOTAL_TESTS}"
-                
-                if [ ${SUCCESS} -ge 3 ]; then
-                    echo "✅ Canary прошел тестирование!"
-                    echo "Веб-сервис работает на порту 8081"
-                    
-                    # Проверяем логи веб-сервиса
-                    echo "Логи веб-сервиса:"
-                    docker service logs app-canary_web-server --tail 5 2>/dev/null || true
-                else
-                    echo "❌ Canary не прошел тестирование"
-                    echo "Последний ответ сервера:"
-                    cat /tmp/canary_test_${TOTAL_TESTS}.html 2>/dev/null | head -50 || echo "(нет данных)"
-                    echo ""
-                    echo "Логи веб-сервиса:"
-                    docker service logs app-canary_web-server --tail 20 2>/dev/null || true
-                    echo ""
-                    echo "Логи БД:"
-                    docker service logs app-canary_db --tail 10 2>/dev/null || true
-                    exit 1
-                fi
-            '''
+                        export DOCKER_HOST="tcp://192.168.0.1:2376"
+                        
+                        echo "⚠️ ВРЕМЕННО ПРОПУСКАЕМ ПРОВЕРКУ СТРУКТУРЫ БД"
+                        echo "Причина: Контейнеры запущены на другом узле Swarm (worker2)"
+                        echo ""
+                        echo "Проверяем, что сервисы запущены:"
+                        docker service ls --filter name=app-canary
+                        echo ""
+                        echo "Проверяем логи БД - они показывают успешную инициализацию:"
+                        docker service logs app-canary_db --tail 3
+                        echo ""
+                        echo "✅ Для продолжения пайплайна пропускаем проверку структуры БД"
+                        echo "⚠️ В реальном проекте нужно настроить кросс-нодовую проверку"
+                    '''
+                }
+            }
         }
-    }
-}
         
         stage('Canary Testing') {
             steps {
                 script {
                     sh '''
-                        echo "=== Тестирование Canary ==="
+                        echo "=== Тестирование Canary (порт 8081) ==="
                         
                         export DOCKER_HOST="tcp://192.168.0.1:2376"
+                        
+                        echo "Даем дополнительное время для запуска PHP..."
+                        sleep 30
                         
                         SUCCESS=0
                         TOTAL_TESTS=5
@@ -272,6 +203,8 @@ stage('Canary Testing') {
                             else
                                 CURL_EXIT=$?
                                 echo "  ❌ Не удалось загрузить страницу (код: ${CURL_EXIT})"
+                                echo "  Проверяем доступность порта..."
+                                timeout 5 nc -z 192.168.0.1 8081 && echo "  Порт 8081 открыт" || echo "  Порт 8081 закрыт"
                             fi
                             
                             sleep 5
@@ -283,16 +216,29 @@ stage('Canary Testing') {
                         
                         if [ ${SUCCESS} -ge 3 ]; then
                             echo "✅ Canary прошел тестирование!"
+                            echo "Веб-сервис работает на порту 8081"
+                            
+                            # Проверяем логи веб-сервиса
+                            echo "Логи веб-сервиса:"
+                            docker service logs app-canary_web-server --tail 5 2>/dev/null || true
                         else
                             echo "❌ Canary не прошел тестирование"
                             echo "Последний ответ сервера:"
-                            cat /tmp/canary_test_${TOTAL_TESTS}.html 2>/dev/null | head -50
+                            cat /tmp/canary_test_${TOTAL_TESTS}.html 2>/dev/null | head -50 || echo "(нет данных)"
+                            echo ""
+                            echo "Логи веб-сервиса:"
+                            docker service logs app-canary_web-server --tail 20 2>/dev/null || true
+                            echo ""
+                            echo "Логи БД:"
+                            docker service logs app-canary_db --tail 10 2>/dev/null || true
                             exit 1
                         fi
                     '''
                 }
             }
         }
+        
+        // ВТОРОЙ ЭТАП 'Canary Testing' УДАЛЕН - ЭТО БЫЛ ДУБЛЬ
         
         stage('Deploy to Production') {
             steps {
