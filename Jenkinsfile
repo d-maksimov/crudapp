@@ -43,7 +43,7 @@ pipeline {
                     script {
                         sh """
                             echo "=== Отправка образов в Docker Hub ==="
-                            echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
+                            echo "\${DOCKER_PASS}" | docker login -u "\${DOCKER_USER}" --password-stdin
                             
                             # Пушим образы с номером сборки
                             docker push ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:${BUILD_NUMBER}
@@ -104,129 +104,83 @@ pipeline {
             }
         }
         
-       stage('Check Database Structure') {
-    steps {
-        script {
-            echo '=== Проверка таблиц базы данных ==='
-            
-            sleep 60
-            
-            sh '''
-                echo "Проверка наличия таблиц 'users' и 'workouts'..."
-                
-                # 1. Ищем контейнер с ТЕКУЩИМ образом (с номером сборки)
-                CURRENT_IMAGE="danil221/mysql-app:${BUILD_NUMBER}"
-                echo "Ищем контейнер с образом: $CURRENT_IMAGE"
-                
-                CONTAINER_ID=$(docker ps --filter "ancestor=$CURRENT_IMAGE" --format "{{.ID}}" | head -1)
-                
-                # 2. Если не нашли, ищем контейнер из стека app-canary
-                if [ -z "$CONTAINER_ID" ]; then
-                    echo "Ищем контейнер в стеке app-canary..."
-                    CONTAINER_ID=$(docker ps --filter "name=app-canary" --format "{{.ID}}" | head -1)
-                fi
-                
-                # 3. Если все еще не нашли, показываем все контейнеры и ищем mysql
-                if [ -z "$CONTAINER_ID" ]; then
-                    echo "=== Все контейнеры ==="
-                    docker ps --format "table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}"
+        stage('Check Database Structure') {
+            steps {
+                script {
+                    echo '=== Проверка таблиц базы данных ==='
                     
-                    # Ищем любой mysql контейнер (последний запущенный)
-                    CONTAINER_ID=$(docker ps --filter "ancestor=danil221/mysql-app" --format "{{.ID}}" | head -1)
-                fi
-                
-                if [ -z "$CONTAINER_ID" ]; then
-                    echo "❌ Контейнер БД не найден"
-                    echo "Ожидался образ: $CURRENT_IMAGE"
-                    echo "Доступные MySQL контейнеры:"
-                    docker ps --filter "ancestor=mysql" --format "table {{.ID}}\t{{.Names}}\t{{.Image}}"
-                    exit 1
-                fi
-                
-                CONTAINER_NAME=$(docker inspect --format '{{.Name}}' $CONTAINER_ID)
-                CONTAINER_IMAGE=$(docker inspect --format '{{.Config.Image}}' $CONTAINER_ID)
-                
-                echo "Найден контейнер: $CONTAINER_NAME"
-                echo "Образ: $CONTAINER_IMAGE"
-                echo "Статус: $(docker inspect --format '{{.State.Status}}' $CONTAINER_ID)"
-                
-                # 4. Проверяем подключение к БД
-                echo "Проверка подключения к БД..."
-                MAX_RETRIES=15
-                for i in $(seq 1 $MAX_RETRIES); do
-                    if docker exec $CONTAINER_ID mysql -u root -prootpassword -e "SELECT 1;" 2>/dev/null; then
-                        echo "✅ Успешное подключение к БД (попытка $i/$MAX_RETRIES)"
-                        break
-                    fi
+                    sleep(time: 60, unit: 'SECONDS')
                     
-                    if [ $i -eq $MAX_RETRIES ]; then
-                        echo "❌ Не удалось подключиться к БД после $MAX_RETRIES попыток"
-                        echo "Логи контейнера:"
-                        docker logs $CONTAINER_ID --tail 30
-                        exit 1
-                    fi
-                    
-                    echo "⏳ Ожидание готовности БД ($i/$MAX_RETRIES)..."
-                    sleep 4
-                done
-                
-                # 5. Проверяем наличие базы данных appdb
-                echo "Проверка наличия базы данных 'appdb'..."
-                if docker exec $CONTAINER_ID mysql -u root -prootpassword -e "SHOW DATABASES;" 2>/dev/null | grep -q "appdb"; then
-                    echo "✅ База данных 'appdb' существует"
-                else
-                    echo "❌ База данных 'appdb' не найдена"
-                    exit 1
-                fi
-                
-                # 6. Проверяем наличие обеих таблиц
-                echo "Проверка наличия таблиц 'users' и 'workouts'..."
-                
-                # Получаем список всех таблиц
-                TABLES_LIST=$(docker exec $CONTAINER_ID mysql -u root -prootpassword appdb -e "SHOW TABLES;" --batch --silent 2>/dev/null || echo "")
-                
-                echo "Все таблицы в БД appdb:"
-                echo "$TABLES_LIST" | while read table; do echo "  - $table"; done
-                
-                # Проверяем наличие конкретных таблиц
-                HAS_USERS=$(echo "$TABLES_LIST" | grep -c "^users$" || true)
-                HAS_WORKOUTS=$(echo "$TABLES_LIST" | grep -c "^workouts$" || true)
-                
-                echo "Таблица 'users': $([ "$HAS_USERS" -eq 1 ] && echo "НАЙДЕНА" || echo "НЕ НАЙДЕНА")"
-                echo "Таблица 'workouts': $([ "$HAS_WORKOUTS" -eq 1 ] && echo "НАЙДЕНА" || echo "НЕ НАЙДЕНА")"
-                
-                # 7. Детальная проверка
-                if [ "$HAS_USERS" -eq 1 ] && [ "$HAS_WORKOUTS" -eq 1 ]; then
-                    echo "✅ Обе таблицы существуют: users и workouts"
-                    
-                    # Проверяем структуру
-                    echo "Структура таблицы 'users':"
-                    docker exec $CONTAINER_ID mysql -u root -prootpassword appdb -e "DESCRIBE users;" 2>/dev/null || echo "Не удалось получить структуру"
-                    
-                    echo "Структура таблицы 'workouts':"
-                    docker exec $CONTAINER_ID mysql -u root -prootpassword appdb -e "DESCRIBE workouts;" 2>/dev/null || echo "Не удалось получить структуру"
-                    
-                    echo "✅ Структура БД корректна"
-                    
-                elif [ "$HAS_USERS" -eq 1 ] && [ "$HAS_WORKOUTS" -eq 0 ]; then
-                    echo "❌ ОШИБКА: Отсутствует таблица 'workouts'"
-                    echo "Проверьте init.sql файл - таблица workouts должна быть создана"
-                    exit 1
-                elif [ "$HAS_USERS" -eq 0 ] && [ "$HAS_WORKOUTS" -eq 1 ]; then
-                    echo "❌ ОШИБКА: Отсутствует таблица 'users'"
-                    echo "Проверьте init.sql файл - таблица users должна быть создана"
-                    exit 1
-                else
-                    echo "❌ ОШИБКА: Отсутствуют обе таблицы: users и workouts"
-                    echo "Проверьте init.sql файл - должны быть созданы обе таблицы"
-                    exit 1
-                fi
-                
-                echo "✅ Проверка БД завершена успешно"
-            '''
+                    sh """
+                        echo "Проверка наличия таблиц 'users' и 'workouts'..."
+                        
+                        # 1. Ищем сервис canary БД
+                        echo "Поиск сервиса app-canary_db..."
+                        
+                        # Используем Docker Host из environment
+                        export DOCKER_HOST="${DOCKER_HOST}"
+                        
+                        SERVICE_INFO=\$(docker service ls --filter name=app-canary_db --format "{{.ID}} {{.Name}} {{.Replicas}}" 2>/dev/null)
+                        
+                        if [ -z "\$SERVICE_INFO" ]; then
+                            echo "❌ Сервис app-canary_db не найден"
+                            echo "Все сервисы:"
+                            docker service ls
+                            exit 1
+                        fi
+                        
+                        echo "Сервис найден: \$SERVICE_INFO"
+                        
+                        # 2. Проверяем через временный контейнер mysql в сети canary
+                        echo "Запуск тестового контейнера для проверки БД..."
+                        
+                        # Создаем временный скрипт для проверки
+                        cat > /tmp/check_tables.sql << 'EOF'
+SELECT 
+    SUM(CASE WHEN table_name = 'users' THEN 1 ELSE 0 END) as has_users,
+    SUM(CASE WHEN table_name = 'workouts' THEN 1 ELSE 0 END) as has_workouts
+FROM information_schema.tables 
+WHERE table_schema = '${MYSQL_DATABASE}';
+EOF
+                        
+                        # Выполняем проверку через временный контейнер
+                        CHECK_RESULT=\$(docker run --rm \
+                            --network app-canary_default \
+                            mysql:8.0 \
+                            mysql -h app-canary_db -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} \
+                            -e "source /tmp/check_tables.sql" \
+                            --batch --silent 2>/dev/null || echo "0 0")
+                        
+                        HAS_USERS=\$(echo \$CHECK_RESULT | awk '{print \$1}')
+                        HAS_WORKOUTS=\$(echo \$CHECK_RESULT | awk '{print \$2}')
+                        
+                        echo "Результат проверки:"
+                        echo "Таблица 'users': \$HAS_USERS (1 = есть, 0 = нет)"
+                        echo "Таблица 'workouts': \$HAS_WORKOUTS (1 = есть, 0 = нет)"
+                        
+                        if [ "\$HAS_USERS" = "1" ] && [ "\$HAS_WORKOUTS" = "1" ]; then
+                            echo "✅ Обе таблицы существуют: users и workouts"
+                            echo "✅ Структура БД корректна"
+                        elif [ "\$HAS_USERS" = "1" ] && [ "\$HAS_WORKOUTS" = "0" ]; then
+                            echo "❌ ОШИБКА: Отсутствует таблица 'workouts'"
+                            echo "Проверьте init.sql файл"
+                            exit 1
+                        elif [ "\$HAS_USERS" = "0" ] && [ "\$HAS_WORKOUTS" = "1" ]; then
+                            echo "❌ ОШИБКА: Отсутствует таблица 'users'"
+                            echo "Проверьте init.sql файл"
+                            exit 1
+                        else
+                            echo "❌ ОШИБКА: Отсутствуют обе таблицы"
+                            echo "Проверьте init.sql файл"
+                            exit 1
+                        fi
+                        
+                        # Удаляем временный файл
+                        rm -f /tmp/check_tables.sql
+                    """
+                }
+            }
         }
-    }
-}
         
         stage('Canary Testing') {
             steps {
@@ -238,8 +192,8 @@ pipeline {
                         
                         for i in \$(seq 1 \$TESTS); do
                             echo "Тест \$i/\$TESTS..."
-                            if curl -f -s --max-time 15 http://${MANAGER_IP}:8081/ > /tmp/canary_\$i.html && \\
-                               ! grep -iq "error\\\\|fatal\\\\|exception\\\\|failed" /tmp/canary_\$i.html; then
+                            if curl -f -s --max-time 15 http://${MANAGER_IP}:8081/ > /tmp/canary_\$i.html 2>/dev/null && \\
+                               ! grep -iq "error\|fatal\|exception\|failed" /tmp/canary_\$i.html 2>/dev/null; then
                                 SUCCESS=\$((SUCCESS + 1))
                                 echo "✓ Тест \$i пройден"
                             else
@@ -266,8 +220,8 @@ pipeline {
                     sh """
                         echo "=== Развертывание Production ==="
                         # Обновляем production сервисы
-                        docker service update --image ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:latest app_web
-                        docker service update --image ${DOCKER_HUB_USER}/${DATABASE_IMAGE_NAME}:latest app_db
+                        docker service update --image ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:latest app_web --with-registry-auth
+                        docker service update --image ${DOCKER_HUB_USER}/${DATABASE_IMAGE_NAME}:latest app_db --with-registry-auth
                         
                         echo "Ожидание обновления..."
                         sleep 30
@@ -290,8 +244,8 @@ pipeline {
                         
                         for i in \$(seq 1 \$TESTS); do
                             echo "Тест \$i/\$TESTS..."
-                            if curl -f -s --max-time 10 http://${MANAGER_IP}:80/ > /tmp/prod_\$i.html && \\
-                               ! grep -iq "error\\\\|fatal\\\\|exception\\\\|failed" /tmp/prod_\$i.html; then
+                            if curl -f -s --max-time 10 http://${MANAGER_IP}:80/ > /tmp/prod_\$i.html 2>/dev/null && \\
+                               ! grep -iq "error\|fatal\|exception\|failed" /tmp/prod_\$i.html 2>/dev/null; then
                                 SUCCESS=\$((SUCCESS + 1))
                                 echo "✓ Тест \$i пройден"
                             else
@@ -321,7 +275,8 @@ pipeline {
                 script {
                     sh """
                         echo "=== Удаление Canary ==="
-                        docker stack rm ${CANARY_APP_NAME} || true
+                        docker stack rm ${CANARY_APP_NAME} 2>/dev/null || true
+                        sleep 10
                         echo "Canary удалён"
                     """
                 }
@@ -331,15 +286,20 @@ pipeline {
     
     post {
         always {
-            sh 'docker logout || true'
-            sh 'rm -f docker-compose_canary_temp.yaml /tmp/canary_*.html /tmp/prod_*.html || true'
+            sh 'docker logout 2>/dev/null || true'
+            sh 'rm -f docker-compose_canary_temp.yaml /tmp/canary_*.html /tmp/prod_*.html /tmp/check_tables.sql 2>/dev/null || true'
         }
         failure {
             echo '✗ Ошибка в пайплайне'
-            sh '''
-                docker stack rm app-canary || true
-                echo "Canary удалён при ошибке"
-            '''
+            script {
+                sh '''
+                    docker stack rm app-canary 2>/dev/null || true
+                    echo "Canary удалён при ошибке"
+                '''
+            }
+        }
+        success {
+            echo '✅ Пайплайн успешно завершён!'
         }
     }
 }
