@@ -1,10 +1,11 @@
+# mysql.Dockerfile
 FROM mysql:8.0
 
-# Копируем init.sql для инициализации базы
+ENV MYSQL_ROOT_PASSWORD=rootpassword
+
 COPY init.sql /docker-entrypoint-initdb.d/
 
-# Устанавливаем переменные окружения
-ENV MYSQL_ROOT_PASSWORD=rootpassword
-ENV MYSQL_DATABASE=appdb
-
-EXPOSE 3306
+# Добавляем конфигурацию для разрешения удаленных подключений
+RUN echo "[mysqld]" > /etc/mysql/conf.d/custom.cnf && \
+    echo "bind-address = 0.0.0.0" >> /etc/mysql/conf.d/custom.cnf && \
+    echo "skip-name-resolve" >> /etc/mysql/conf.d/custom.cnf
