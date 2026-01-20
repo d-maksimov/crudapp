@@ -141,7 +141,7 @@ pipeline {
             }
         }
         
-        stage('Check Database Structure') {
+       stage('Check Database Structure') {
     steps {
         script {
             sh """
@@ -154,18 +154,20 @@ pipeline {
 
                 echo "2. Проверяем наличие таблиц users и workouts..."
 
-                # Запускаем временный mysql-клиент в overlay-сети canary
+                SQL="SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${MYSQL_DATABASE}' AND table_name IN ('users','workouts');"
+
+                set +e
                 TABLE_COUNT=\$(docker run --rm \\
                     --network ${CANARY_APP_NAME}_default \\
                     mysql:8.0 \\
-                    mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} \\
-                    -N -e "SELECT COUNT(*) FROM information_schema.tables 
-                           WHERE table_schema='${MYSQL_DATABASE}'
-                           AND table_name IN ('users','workouts');" \
-                    2>/dev/null || echo "ERROR")
+                    mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} -N -e "\$SQL")
+                MYSQL_EXIT=\$?
+                set -e
 
-                if [ "\$TABLE_COUNT" = "ERROR" ]; then
-                    echo "❌ Ошибка подключения к БД"
+                if [ "\$MYSQL_EXIT" -ne 0 ]; then
+                    echo "❌ Ошибка выполнения SQL-запроса"
+                    echo "Проверяем доступность БД:"
+                    docker service logs ${CANARY_APP_NAME}_db --tail 10 2>/dev/null || true
                     exit 1
                 fi
 
@@ -174,27 +176,21 @@ pipeline {
                 if [ "\$TABLE_COUNT" -ne 2 ]; then
                     echo "❌ Структура БД некорректна"
                     echo "Ожидались таблицы: users, workouts"
-
                     echo ""
                     echo "Фактически найдено:"
                     docker run --rm \\
                         --network ${CANARY_APP_NAME}_default \\
                         mysql:8.0 \\
-                        mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} \\
-                        -e "SHOW TABLES;" 2>/dev/null || true
-
+                        mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} -e "SHOW TABLES;" || true
                     exit 1
                 fi
 
                 echo "✅ Структура БД корректна (users + workouts присутствуют)"
-
-                echo ""
-                echo "3. Логи БД (информационно):"
-                docker service logs ${CANARY_APP_NAME}_db --tail 5 2>/dev/null || true
             """
         }
     }
 }
+
 
         stage('Canary Testing') {
             steps {
