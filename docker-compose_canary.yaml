@@ -13,9 +13,6 @@ services:
     environment:
       - MYSQL_ROOT_PASSWORD=rootpassword
       - MYSQL_DATABASE=appdb
-    # НЕ используем volume для тестирования
-    # volumes:
-    #   - mysql-canary-data:/var/lib/mysql
 
   web-server:
     image: ${DOCKER_HUB_USER}/php-app:${BUILD_NUMBER}
@@ -32,5 +29,7 @@ services:
     depends_on:
       - db
 
-# volumes:
-#   mysql-canary-data:
+networks:
+  default:
+    driver: overlay
+    attachable: true  # <--- ДОБАВЬТЕ ЭТУ СТРОЧКУ
