@@ -4,24 +4,17 @@ pipeline {
     }
     
     environment {
-        // Основные настройки
         APP_NAME = 'app'
         CANARY_APP_NAME = 'app-canary'
         DOCKER_HUB_USER = 'danil221'
         GIT_REPO = 'https://github.com/d-maksimov/crudapp.git'
-        
-        // Имена образов
         BACKEND_IMAGE_NAME = 'php-app'
         DATABASE_IMAGE_NAME = 'mysql-app'
-        
-        // Сетевые настройки
         MANAGER_IP = '192.168.0.1'
-        DOCKER_HOST = 'tcp://192.168.0.1:2376'
-        
-        // Настройки базы данных
         MYSQL_ROOT_PASSWORD = 'rootpassword'
         MYSQL_APP_PASSWORD = 'userpassword'
         MYSQL_DATABASE = 'appdb'
+        DOCKER_HOST = 'tcp://192.168.0.1:2376'
     }
     
     stages {
@@ -61,22 +54,18 @@ pipeline {
                         sh """
                             echo "=== Отправка образов в Docker Hub ==="
                             
-                            # Логин в Docker Hub
                             echo "\${DOCKER_PASS}" | docker login -u "\${DOCKER_USER}" --password-stdin
                             
-                            # Пушим образы с номером сборки
                             echo "1. Публикация PHP образа с тегом ${BUILD_NUMBER}..."
                             docker push ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:${BUILD_NUMBER}
                             
                             echo "2. Публикация MySQL образа с тегом ${BUILD_NUMBER}..."
                             docker push ${DOCKER_HUB_USER}/${DATABASE_IMAGE_NAME}:${BUILD_NUMBER}
                             
-                            # Добавляем тег latest
                             echo "3. Добавление тега latest..."
                             docker tag ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:${BUILD_NUMBER} ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:latest
                             docker tag ${DOCKER_HUB_USER}/${DATABASE_IMAGE_NAME}:${BUILD_NUMBER} ${DOCKER_HUB_USER}/${DATABASE_IMAGE_NAME}:latest
                             
-                            # Пушим latest теги
                             echo "4. Публикация тегов latest..."
                             docker push ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:latest
                             docker push ${DOCKER_HUB_USER}/${DATABASE_IMAGE_NAME}:latest
@@ -91,54 +80,51 @@ pipeline {
         stage('Deploy Canary') {
             steps {
                 script {
-                    sh '''
+                    sh """
                         echo "=== Развёртывание Canary ==="
                         
-                        # Экспортируем DOCKER_HOST для работы с Swarm
-                        export DOCKER_HOST="tcp://192.168.0.1:2376"
+                        export DOCKER_HOST="${DOCKER_HOST}"
                         
-                        # Удаляем старый canary стек если есть
                         echo "1. Очистка предыдущего canary..."
-                        docker stack rm app-canary 2>/dev/null || true
+                        docker stack rm ${CANARY_APP_NAME} 2>/dev/null || true
                         sleep 15
                         
-                        # Подготавливаем docker-compose файл для canary
                         echo "2. Подготовка docker-compose для canary..."
                         cp docker-compose_canary.yaml docker-compose_canary_temp.yaml
-                        sed -i "s/\\${BUILD_NUMBER}/''' + "${BUILD_NUMBER}" + '''/g" docker-compose_canary_temp.yaml
-                        sed -i "s/\\${DOCKER_HUB_USER}/danil221/g" docker-compose_canary_temp.yaml
+                        sed -i "s/\\\${BUILD_NUMBER}/${BUILD_NUMBER}/g" docker-compose_canary_temp.yaml
+                        sed -i "s/\\\${DOCKER_HUB_USER}/${DOCKER_HUB_USER}/g" docker-compose_canary_temp.yaml
                         
                         echo "3. Проверка конфигурации:"
                         echo "---"
                         grep "image:" docker-compose_canary_temp.yaml
                         echo "---"
                         
-                        # Разворачиваем canary
                         echo "4. Развертывание canary стека..."
-                        docker stack deploy -c docker-compose_canary_temp.yaml app-canary --with-registry-auth
+                        docker stack deploy -c docker-compose_canary_temp.yaml ${CANARY_APP_NAME} --with-registry-auth
                         
-                        # Ждем запуска сервисов
                         echo "5. Ожидание запуска canary сервисов..."
-                        TIMEOUT=180  # 3 минуты
-                        START_TIME=$(date +%s)
+                        TIMEOUT=300  # 5 минут для MySQL
+                        START_TIME=\$(date +%s)
                         
                         while true; do
-                            CURRENT_TIME=$(date +%s)
-                            ELAPSED=$((CURRENT_TIME - START_TIME))
+                            CURRENT_TIME=\$(date +%s)
+                            ELAPSED=\$((CURRENT_TIME - START_TIME))
                             
-                            if [ $ELAPSED -ge $TIMEOUT ]; then
+                            if [ \$ELAPSED -ge \$TIMEOUT ]; then
                                 echo "❌ Таймаут ожидания запуска canary"
                                 echo "Статус сервисов:"
-                                docker service ls --filter name=app-canary
+                                docker service ls --filter name=${CANARY_APP_NAME}
+                                echo "Логи БД:"
+                                docker service logs ${CANARY_APP_NAME}_db --tail 20 2>/dev/null || true
                                 exit 1
                             fi
                             
-                            DB_STATUS=$(docker service ls --filter name=app-canary_db --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
-                            WEB_STATUS=$(docker service ls --filter name=app-canary_web-server --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
+                            DB_STATUS=\$(docker service ls --filter name=${CANARY_APP_NAME}_db --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
+                            WEB_STATUS=\$(docker service ls --filter name=${CANARY_APP_NAME}_web-server --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
                             
-                            echo "  DB: ${DB_STATUS}, Web: ${WEB_STATUS}"
+                            echo "  DB: \${DB_STATUS}, Web: \${WEB_STATUS}"
                             
-                            if echo "${DB_STATUS}" | grep -q "1/1" && echo "${WEB_STATUS}" | grep -q "1/1"; then
+                            if echo "\${DB_STATUS}" | grep -q "1/1" && echo "\${WEB_STATUS}" | grep -q "1/1"; then
                                 echo "✅ Canary сервисы запущены"
                                 break
                             fi
@@ -146,12 +132,11 @@ pipeline {
                             sleep 10
                         done
                         
-                        # Дополнительное время для инициализации БД
-                        echo "6. Ожидание инициализации базы данных..."
-                        sleep 45
+                        echo "6. Ожидание полной инициализации БД..."
+                        sleep 60  # Даем время на выполнение init.sql
                         
                         echo "✅ Canary развернут на порту 8081"
-                    '''
+                    """
                 }
             }
         }
@@ -174,48 +159,104 @@ FROM information_schema.tables
 WHERE table_schema = 'appdb';
 EOF
                         
-                        # Пробуем подключиться несколько раз
+                        # Увеличиваем количество попыток и время ожидания
                         echo "Проверка структуры БД canary..."
-                        for attempt in 1 2 3 4 5 6; do
-                            echo "Попытка $attempt из 6..."
+                        MAX_ATTEMPTS=10
+                        
+                        for ATTEMPT in $(seq 1 ${MAX_ATTEMPTS}); do
+                            echo "Попытка ${ATTEMPT} из ${MAX_ATTEMPTS}..."
                             
-                            # Проверяем доступность БД
-                            if docker run --rm --network app-canary_default \\
-                                mysql:8.0 mysql -h app-canary_db -u root -prootpassword \\
-                                -e "SELECT 1;" --connect-timeout=15 2>/dev/null; then
+                            # Сначала проверяем, что контейнер БД вообще доступен
+                            echo "  Проверка доступности контейнера БД..."
+                            
+                            # Получаем ID контейнера БД
+                            DB_CONTAINER_ID=$(docker ps --filter "name=app-canary_db" --format "{{.ID}}" | head -1)
+                            
+                            if [ -z "$DB_CONTAINER_ID" ]; then
+                                echo "  ❌ Контейнер БД не найден"
+                                echo "  Все контейнеры:"
+                                docker ps --format "table {{.ID}}\t{{.Names}}\t{{.Status}}" | head -10
+                                sleep 20
+                                continue
+                            fi
+                            
+                            echo "  ✅ Контейнер найден: $DB_CONTAINER_ID"
+                            
+                            # Проверяем статус контейнера
+                            CONTAINER_STATUS=$(docker inspect $DB_CONTAINER_ID --format "{{.State.Status}}" 2>/dev/null)
+                            echo "  Статус контейнера: $CONTAINER_STATUS"
+                            
+                            # Проверяем, запущен ли MySQL процесс внутри контейнера
+                            echo "  Проверка MySQL процесса в контейнере..."
+                            if docker exec $DB_CONTAINER_ID mysqladmin ping -u root -prootpassword 2>/dev/null; then
+                                echo "  ✅ MySQL процесс работает"
                                 
-                                echo "✅ Подключение к БД успешно"
-                                
-                                # Проверяем таблицы
-                                RESULT=$(docker run --rm --network app-canary_default \\
-                                    -v /tmp/check_db.sql:/tmp/check_db.sql \\
-                                    mysql:8.0 mysql -h app-canary_db -u root -prootpassword appdb \\
-                                    -e "source /tmp/check_db.sql" --batch --silent 2>/dev/null || echo "0 0")
-                                
-                                HAS_USERS=$(echo $RESULT | awk '{print $1}')
-                                HAS_WORKOUTS=$(echo $RESULT | awk '{print $2}')
-                                
-                                echo "Результат проверки:"
-                                echo "  Таблица 'users': $HAS_USERS"
-                                echo "  Таблица 'workouts': $HAS_WORKOUTS"
-                                
-                                if [ "$HAS_USERS" = "1" ] && [ "$HAS_WORKOUTS" = "1" ]; then
-                                    echo "✅ Структура БД корректна"
-                                    rm -f /tmp/check_db.sql
-                                    exit 0
+                                # Теперь проверяем доступность по сети
+                                echo "  Проверка сетевого подключения..."
+                                if docker run --rm --network app-canary_default \
+                                    mysql:8.0 mysql -h app-canary_db -u root -prootpassword \
+                                    -e "SELECT 1;" --connect-timeout=30 2>/dev/null; then
+                                    
+                                    echo "  ✅ Сетевое подключение установлено"
+                                    
+                                    # Проверяем таблицы
+                                    RESULT=$(docker run --rm --network app-canary_default \
+                                        -v /tmp/check_db.sql:/tmp/check_db.sql \
+                                        mysql:8.0 mysql -h app-canary_db -u root -prootpassword appdb \
+                                        -e "source /tmp/check_db.sql" --batch --silent 2>/dev/null || echo "0 0")
+                                    
+                                    HAS_USERS=$(echo $RESULT | awk "{print \$1}")
+                                    HAS_WORKOUTS=$(echo $RESULT | awk "{print \$2}")
+                                    
+                                    echo "  Результат проверки:"
+                                    echo "    Таблица 'users': $HAS_USERS"
+                                    echo "    Таблица 'workouts': $HAS_WORKOUTS"
+                                    
+                                    if [ "$HAS_USERS" = "1" ] && [ "$HAS_WORKOUTS" = "1" ]; then
+                                        echo "✅ Структура БД корректна"
+                                        echo "  Таблицы 'users' и 'workouts' созданы успешно"
+                                        
+                                        # Дополнительная проверка - количество записей
+                                        echo "  Проверка тестовых данных..."
+                                        DATA_CHECK=$(docker run --rm --network app-canary_default \
+                                            mysql:8.0 mysql -h app-canary_db -u root -prootpassword appdb \
+                                            -e "SELECT COUNT(*) as user_count FROM users; SELECT COUNT(*) as workout_count FROM workouts;" --batch --silent 2>/dev/null)
+                                        
+                                        USER_COUNT=$(echo "$DATA_CHECK" | head -1)
+                                        WORKOUT_COUNT=$(echo "$DATA_CHECK" | tail -1)
+                                        
+                                        echo "    Пользователей: $USER_COUNT"
+                                        echo "    Тренировок: $WORKOUT_COUNT"
+                                        
+                                        rm -f /tmp/check_db.sql
+                                        exit 0
+                                    else
+                                        echo "❌ Проблема со структурой БД"
+                                        echo "  Проверьте init.sql файл"
+                                        echo "  Содержимое БД:"
+                                        docker run --rm --network app-canary_default \
+                                            mysql:8.0 mysql -h app-canary_db -u root -prootpassword \
+                                            -e "SHOW DATABASES; USE appdb; SHOW TABLES;" 2>/dev/null || true
+                                        rm -f /tmp/check_db.sql
+                                        exit 1
+                                    fi
                                 else
-                                    echo "❌ Проблема со структурой БД"
-                                    echo "Проверьте init.sql файл"
-                                    rm -f /tmp/check_db.sql
-                                    exit 1
+                                    echo "  ⚠️ Нет сетевого подключения к БД"
                                 fi
                             else
-                                echo "⏳ БД еще не готова, ждем 15 секунд..."
-                                sleep 15
+                                echo "  ⚠️ MySQL процесс не готов"
                             fi
+                            
+                            # Если не удалось, ждем дольше для следующих попыток
+                            WAIT_TIME=$((ATTEMPT * 15))
+                            echo "  ⏳ Ждем ${WAIT_TIME} секунд перед следующей попыткой..."
+                            sleep ${WAIT_TIME}
                         done
                         
-                        echo "❌ Не удалось проверить структуру БД"
+                        echo "❌ Не удалось проверить структуру БД после ${MAX_ATTEMPTS} попыток"
+                        echo "  Проверьте логи БД:"
+                        docker service logs app-canary_db --tail 30 2>/dev/null || true
+                        
                         rm -f /tmp/check_db.sql
                         exit 1
                     '''
@@ -246,7 +287,7 @@ EOF
                                 SIZE=$(wc -c < /tmp/canary_test_${i}.html)
                                 echo "  ✓ Страница загружена (${SIZE} байт)"
                                 
-                                # Проверяем на наличие ошибок - используем экранирование через переменную
+                                # Проверяем на наличие ошибок
                                 ERROR_PATTERN="error|fatal|exception|failed|syntax|warning"
                                 if ! grep -q -i "${ERROR_PATTERN}" /tmp/canary_test_${i}.html 2>/dev/null; then
                                     SUCCESS=$((SUCCESS + 1))
@@ -292,11 +333,11 @@ EOF
                         docker service ls --filter name=app_
                         
                         echo "2. Обновление web сервиса..."
-                        docker service update \\
-                            --image danil221/php-app:latest \\
-                            --update-parallelism 1 \\
-                            --update-delay 10s \\
-                            --with-registry-auth \\
+                        docker service update \
+                            --image danil221/php-app:latest \
+                            --update-parallelism 1 \
+                            --update-delay 10s \
+                            --with-registry-auth \
                             app_web
                         
                         echo "3. Ожидание обновления..."
@@ -333,7 +374,6 @@ EOF
                                 SIZE=$(wc -c < /tmp/prod_test_${i}.html)
                                 echo "  ✓ Страница загружена (${SIZE} байт)"
                                 
-                                # Используем переменную для паттерна поиска
                                 ERROR_PATTERN="error|fatal|exception|failed|syntax|warning"
                                 if ! grep -q -i "${ERROR_PATTERN}" /tmp/prod_test_${i}.html 2>/dev/null; then
                                     SUCCESS=$((SUCCESS + 1))
