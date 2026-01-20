@@ -3,33 +3,62 @@ version: '3.8'
 services:
   db:
     image: ${DOCKER_HUB_USER}/mysql-app:${BUILD_NUMBER}
-    deploy:
-      replicas: 1
+    environment:
+      - MYSQL_ROOT_PASSWORD=rootpassword
+      - MYSQL_DATABASE=appdb
+      - MYSQL_USER=user
+      - MYSQL_PASSWORD=userpassword
+    volumes:
+      - canary_mysql_data:/var/lib/mysql
+      - canary_mysql_config:/etc/mysql/conf.d
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
       interval: 5s
       timeout: 3s
       retries: 10
-    environment:
-      - MYSQL_ROOT_PASSWORD=rootpassword
-      - MYSQL_DATABASE=appdb
+      start_period: 30s
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role != manager
 
   web-server:
     image: ${DOCKER_HUB_USER}/php-app:${BUILD_NUMBER}
-    deploy:
-      replicas: 1
-    ports:
-      - "8081:80"
     environment:
       - DB_HOST=db
+      - DB_PORT=3306
       - DB_NAME=appdb
       - DB_USER=user
       - DB_PASSWORD=userpassword
       - APP_ENV=canary
+    ports:
+      - "8081:80"
     depends_on:
-      - db
+      condition: service_healthy
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role != manager
 
 networks:
   default:
     driver: overlay
-    attachable: true  # <--- ДОБАВЬТЕ ЭТУ СТРОЧКУ
+    attachable: true
+
+volumes:
+  canary_mysql_data:
+    driver: local
+  canary_mysql_config:
+    driver: local

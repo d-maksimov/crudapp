@@ -87,23 +87,36 @@ pipeline {
                         
                         echo "1. Очистка предыдущего canary..."
                         docker stack rm ${CANARY_APP_NAME} 2>/dev/null || true
-                        sleep 15
+                        sleep 10
                         
-                        echo "2. Подготовка docker-compose для canary..."
+                        echo "2. Проверка существующих сервисов MySQL..."
+                        EXISTING_MYSQL_PORTS=\$(docker service ls --format "{{.Ports}}" | grep -o "3306" || echo "")
+                        
+                        if [ -n "\${EXISTING_MYSQL_PORTS}" ]; then
+                            echo "⚠️  Обнаружены существующие MySQL сервисы на порту 3306"
+                            echo "Canary БД будет использовать порт 3307"
+                            CANARY_DB_PORT="3307"
+                        else
+                            echo "✅ Порт 3306 свободен"
+                            CANARY_DB_PORT="3306"
+                        fi
+                        
+                        echo "3. Подготовка docker-compose для canary..."
                         cp docker-compose_canary.yaml docker-compose_canary_temp.yaml
                         sed -i "s/\\\${BUILD_NUMBER}/${BUILD_NUMBER}/g" docker-compose_canary_temp.yaml
                         sed -i "s/\\\${DOCKER_HUB_USER}/${DOCKER_HUB_USER}/g" docker-compose_canary_temp.yaml
+                        sed -i "s/3306:3306/\${CANARY_DB_PORT}:3306/g" docker-compose_canary_temp.yaml
                         
-                        echo "3. Проверка конфигурации:"
+                        echo "4. Проверка конфигурации:"
                         echo "---"
-                        grep "image:" docker-compose_canary_temp.yaml
+                        cat docker-compose_canary_temp.yaml
                         echo "---"
                         
-                        echo "4. Развертывание canary стека..."
+                        echo "5. Развертывание canary стека..."
                         docker stack deploy -c docker-compose_canary_temp.yaml ${CANARY_APP_NAME} --with-registry-auth
                         
-                        echo "5. Ожидание запуска canary сервисов..."
-                        TIMEOUT=300  # 5 минут для MySQL
+                        echo "6. Ожидание запуска canary сервисов..."
+                        TIMEOUT=180  # 3 минуты
                         START_TIME=\$(date +%s)
                         
                         while true; do
@@ -114,8 +127,13 @@ pipeline {
                                 echo "❌ Таймаут ожидания запуска canary"
                                 echo "Статус сервисов:"
                                 docker service ls --filter name=${CANARY_APP_NAME}
+                                echo ""
+                                echo "Детальная диагностика:"
+                                echo "Задачи БД:"
+                                docker service ps ${CANARY_APP_NAME}_db --no-trunc 2>/dev/null || true
+                                echo ""
                                 echo "Логи БД:"
-                                docker service logs ${CANARY_APP_NAME}_db --tail 20 2>/dev/null || true
+                                docker service logs ${CANARY_APP_NAME}_db --tail 30 2>/dev/null || true
                                 exit 1
                             fi
                             
@@ -124,87 +142,102 @@ pipeline {
                             
                             echo "  DB: \${DB_STATUS}, Web: \${WEB_STATUS}"
                             
+                            # Проверяем статус запуска БД
                             if echo "\${DB_STATUS}" | grep -q "1/1" && echo "\${WEB_STATUS}" | grep -q "1/1"; then
                                 echo "✅ Canary сервисы запущены"
                                 break
                             fi
                             
-                            sleep 10
+                            sleep 5
                         done
                         
-                        echo "6. Ожидание полной инициализации БД..."
-                        sleep 60  # Даем время на выполнение init.sql
+                        echo "7. Ожидание полной инициализации БД..."
+                        sleep 30
                         
-                        echo "✅ Canary развернут на порту 8081"
+                        echo "✅ Canary развернут на порту 8081 (БД на порту \${CANARY_DB_PORT})"
                     """
                 }
             }
         }
         
-       stage('Check Database Structure') {
-    steps {
-        script {
-            sh """
-                echo "=== Проверка структуры БД Canary ==="
-                export DOCKER_HOST="${DOCKER_HOST}"
-
-                echo "1. Ожидание доступности MySQL (mysqladmin ping)..."
-
-                for i in \$(seq 1 30); do
-                    docker run --rm \\
-                        --network ${CANARY_APP_NAME}_default \\
-                        mysql:8.0 \\
-                        mysqladmin ping -h db -u root -p${MYSQL_ROOT_PASSWORD} --silent
-
-                    if [ \$? -eq 0 ]; then
-                        echo "✅ MySQL доступен"
-                        break
-                    fi
-
-                    echo "⏳ MySQL ещё не готов... (\$i)"
-                    sleep 5
-                done
-
-                docker run --rm \\
-                    --network ${CANARY_APP_NAME}_default \\
-                    mysql:8.0 \\
-                    mysqladmin ping -h db -u root -p${MYSQL_ROOT_PASSWORD} --silent
-
-                if [ \$? -ne 0 ]; then
-                    echo "❌ MySQL так и не стал доступен"
-                    docker service logs ${CANARY_APP_NAME}_db --tail 20 || true
-                    exit 1
-                fi
-
-                echo "2. Проверка наличия таблиц users и workouts"
-
-                SQL="SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${MYSQL_DATABASE}' AND table_name IN ('users','workouts');"
-
-                TABLE_COUNT=\$(docker run --rm \\
-                    --network ${CANARY_APP_NAME}_default \\
-                    mysql:8.0 \\
-                    mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} -N -e "\$SQL")
-
-                echo "Найдено таблиц: \$TABLE_COUNT"
-
-                if [ "\$TABLE_COUNT" -ne 2 ]; then
-                    echo "❌ Структура БД некорректна"
-                    echo "Фактические таблицы:"
-                    docker run --rm \\
-                        --network ${CANARY_APP_NAME}_default \\
-                        mysql:8.0 \\
-                        mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} -e "SHOW TABLES;" || true
-                    exit 1
-                fi
-
-                echo "✅ Структура БД корректна"
-            """
+        stage('Check Database Structure') {
+            steps {
+                script {
+                    sh """
+                        echo "=== Проверка структуры БД Canary ==="
+                        export DOCKER_HOST="${DOCKER_HOST}"
+                        
+                        echo "1. Определение порта БД Canary..."
+                        # Получаем фактический порт БД из сервиса
+                        DB_PORT=\$(docker service ls --filter name=${CANARY_APP_NAME}_db --format "{{.Ports}}" 2>/dev/null | grep -o ":[0-9]*->" | grep -o "[0-9]*" || echo "3306")
+                        
+                        echo "Порт БД Canary: \${DB_PORT}"
+                        
+                        echo "2. Ожидание доступности MySQL..."
+                        MAX_RETRIES=30
+                        
+                        for i in \$(seq 1 \$MAX_RETRIES); do
+                            if timeout 10 docker run --rm \\
+                                --network ${CANARY_APP_NAME}_default \\
+                                mysql:8.0 \\
+                                mysqladmin ping -h db -u root -p${MYSQL_ROOT_PASSWORD} --silent 2>/dev/null; then
+                                echo "✅ MySQL доступен после \$i попыток"
+                                break
+                            fi
+                            
+                            echo "⏳ MySQL ещё не готов... (\$i/\$MAX_RETRIES)"
+                            sleep 5
+                            
+                            if [ \$i -eq \$MAX_RETRIES ]; then
+                                echo "❌ MySQL так и не стал доступен"
+                                echo "Проверяем логи БД:"
+                                docker service logs ${CANARY_APP_NAME}_db --tail 20 2>/dev/null || true
+                                echo "Проверяем состояние задач:"
+                                docker service ps ${CANARY_APP_NAME}_db --no-trunc 2>/dev/null || true
+                                exit 1
+                            fi
+                        done
+                        
+                        echo "3. Проверка наличия таблиц users и workouts"
+                        
+                        SQL="SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${MYSQL_DATABASE}' AND table_name IN ('users','workouts');"
+                        
+                        TABLE_COUNT=\$(docker run --rm \\
+                            --network ${CANARY_APP_NAME}_default \\
+                            mysql:8.0 \\
+                            mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} -N -e "\$SQL" 2>/dev/null || echo "0")
+                        
+                        echo "Найдено таблиц: \$TABLE_COUNT"
+                        
+                        if [ "\$TABLE_COUNT" -eq 2 ]; then
+                            echo "✅ Структура БД корректна"
+                        else
+                            echo "❌ Структура БД некорректна (ожидается 2 таблицы)"
+                            echo "Список всех таблиц в БД:"
+                            docker run --rm \\
+                                --network ${CANARY_APP_NAME}_default \\
+                                mysql:8.0 \\
+                                mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} -e "SHOW TABLES;" 2>/dev/null || true
+                            exit 1
+                        fi
+                        
+                        echo "4. Проверка соединения веб-сервиса с БД..."
+                        
+                        # Тестируем соединение через веб-сервис
+                        curl -f -s --max-time 30 "http://${MANAGER_IP}:8081" > /dev/null
+        
+                        if [ \$? -eq 0 ]; then
+                            echo "✅ Веб-сервис успешно подключился к БД"
+                        else
+                            echo "⚠️  Проблемы с подключением веб-сервиса к БД"
+                            echo "Логи веб-сервиса:"
+                            docker service logs ${CANARY_APP_NAME}_web-server --tail 10 2>/dev/null || true
+                        fi
+                    """
+                }
+            }
         }
-    }
-}
-
-
-
+        
         stage('Canary Testing') {
             steps {
                 script {
@@ -213,14 +246,14 @@ pipeline {
                         
                         export DOCKER_HOST="tcp://192.168.0.1:2376"
                         
-                        echo "Даем дополнительное время для запуска PHP..."
-                        sleep 30
+                        echo "1. Даем дополнительное время для запуска PHP..."
+                        sleep 20
                         
                         SUCCESS=0
                         TOTAL_TESTS=5
                         CANARY_URL="http://192.168.0.1:8081"
                         
-                        echo "Тестирование canary по адресу: ${CANARY_URL}"
+                        echo "2. Тестирование canary по адресу: ${CANARY_URL}"
                         
                         for i in 1 2 3 4 5; do
                             echo ""
@@ -277,8 +310,6 @@ pipeline {
                 }
             }
         }
-        
-        // ВТОРОЙ ЭТАП 'Canary Testing' УДАЛЕН - ЭТО БЫЛ ДУБЛЬ
         
         stage('Deploy to Production') {
             steps {
@@ -376,7 +407,7 @@ pipeline {
                         docker stack rm app-canary 2>/dev/null || true
                         
                         echo "2. Ожидание удаления..."
-                        sleep 20
+                        sleep 15
                         
                         echo "3. Проверка удаления..."
                         if docker stack ls | grep -q app-canary; then
@@ -423,6 +454,9 @@ pipeline {
                     
                     echo "3. Состояние сервисов:"
                     docker service ls 2>/dev/null | head -20
+                    
+                    echo "4. Очистка неудачных задач..."
+                    docker service ps -f "desired-state=running" --no-trunc 2>/dev/null | grep "Shutdown" || true
                 '''
             }
         }
