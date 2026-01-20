@@ -155,79 +155,160 @@ pipeline {
                 echo "2. Проверяем наличие сети..."
                 docker network ls | grep app-canary_default
                 
-                echo "3. Проверяем, что контейнер БД существует..."
-                docker ps --filter "ancestor=danil221/mysql-app" --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}"
+                echo "3. Проверяем, что контейнер БД существует на ВСЕХ узлах..."
+                echo "Поиск по имени сервиса (может быть на worker узле)..."
                 
-                echo "4. Находим ID контейнера БД..."
-                DB_CONTAINER_ID=$(docker ps --filter "ancestor=danil221/mysql-app" --format "{{.ID}}" | head -1)
+                # Ищем контейнеры по части имени (app-canary_db)
+                DB_CONTAINER_ID=$(docker ps --format "{{.ID}}\t{{.Names}}" | grep "app-canary_db" | head -1 | awk '{print $1}')
                 
                 if [ -z "$DB_CONTAINER_ID" ]; then
-                    echo "❌ Контейнер БД не найден!"
-                    echo "Все контейнеры:"
-                    docker ps --format "table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}"
-                    exit 1
-                fi
-                
-                echo "✅ Контейнер найден: $DB_CONTAINER_ID"
-                
-                echo "5. Проверяем, что MySQL процесс работает внутри контейнера..."
-                if docker exec $DB_CONTAINER_ID mysqladmin ping -u root -prootpassword 2>&1; then
-                    echo "✅ MySQL процесс работает"
-                else
-                    echo "❌ MySQL процесс не работает"
-                    echo "Логи контейнера:"
-                    docker logs $DB_CONTAINER_ID --tail 10 2>&1
-                    exit 1
-                fi
-                
-                echo "6. Проверяем базы данных изнутри контейнера..."
-                docker exec $DB_CONTAINER_ID mysql -u root -prootpassword -e "SHOW DATABASES;" 2>&1
-                
-                echo "7. Проверяем базу данных appdb..."
-                docker exec $DB_CONTAINER_ID mysql -u root -prootpassword -e "USE appdb; SHOW TABLES;" 2>&1
-                
-                echo "8. Проверяем конкретные таблицы..."
-                TABLES=$(docker exec $DB_CONTAINER_ID mysql -u root -prootpassword -e "USE appdb; SHOW TABLES;" --batch --silent 2>/dev/null || echo "")
-                
-                if echo "$TABLES" | grep -q "users" && echo "$TABLES" | grep -q "workouts"; then
-                    echo "✅ Обе таблицы найдены: users и workouts"
+                    echo "⚠️ Контейнер не найден по имени, ищем все контейнеры..."
+                    echo "Все контейнеры в Swarm:"
+                    docker ps --format "table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}" | head -15
                     
-                    echo "9. Проверяем количество записей..."
-                    USERS_COUNT=$(docker exec $DB_CONTAINER_ID mysql -u root -prootpassword -e "USE appdb; SELECT COUNT(*) FROM users;" --batch --silent 2>/dev/null || echo "0")
-                    WORKOUTS_COUNT=$(docker exec $DB_CONTAINER_ID mysql -u root -prootpassword -e "USE appdb; SELECT COUNT(*) FROM workouts;" --batch --silent 2>/dev/null || echo "0")
+                    # Пробуем найти контейнер на всех узлах через задачи сервиса
+                    echo "Поиск через задачи сервиса..."
+                    TASK_ID=$(docker service ps app-canary_db --filter "desired-state=running" --format "{{.ID}}" | head -1)
                     
-                    echo "Количество пользователей: $USERS_COUNT"
-                    echo "Количество тренировок: $WORKOUTS_COUNT"
-                    
-                    if [ "$USERS_COUNT" -gt "0" ] && [ "$WORKOUTS_COUNT" -gt "0" ]; then
-                        echo "✅ Данные успешно загружены!"
-                    else
-                        echo "⚠️ В таблицах нет данных или не удалось их прочитать"
+                    if [ ! -z "$TASK_ID" ]; then
+                        echo "Задача сервиса найдена: $TASK_ID"
+                        echo "Информация о задаче:"
+                        docker service ps app-canary_db --filter "desired-state=running" --no-trunc
+                        
+                        # Получаем узел, где запущена задача
+                        NODE=$(docker service ps app-canary_db --filter "desired-state=running" --format "{{.Node}}" | head -1)
+                        echo "Контейнер запущен на узле: $NODE"
+                        
+                        # Если контейнер на другом узле, используем Docker API для проверки
+                        echo "Контейнер может быть на другом узле Swarm."
+                        echo "Проверяем через сетевое подключение (должно работать через Swarm DNS)..."
                     fi
                     
-                    echo "✅ ПРОВЕРКА УСПЕШНО ЗАВЕРШЕНА!"
+                    # Пробуем подключиться через имя сервиса в сети
+                    echo "4. Пробуем подключиться через имя сервиса..."
+                    echo "Создаем тестовый контейнер для проверки подключения..."
+                    
+                    # Простая проверка - можем ли мы подключиться к MySQL через сеть
+                    cat > /tmp/test_mysql.sh << "EOF"
+#!/bin/bash
+echo "Тест подключения к MySQL..."
+MAX_ATTEMPTS=10
+for i in $(seq 1 $MAX_ATTEMPTS); do
+    echo "Попытка $i/$MAX_ATTEMPTS..."
+    if mysql -h app-canary_db -u root -prootpassword -e "SELECT 1" 2>/dev/null; then
+        echo "✅ Подключение успешно!"
+        
+        echo "Проверяем базы данных..."
+        mysql -h app-canary_db -u root -prootpassword -e "SHOW DATABASES;" 2>&1
+        
+        echo "Проверяем базу appdb..."
+        if mysql -h app-canary_db -u root -prootpassword appdb -e "SHOW TABLES;" 2>/dev/null; then
+            echo "✅ База appdb доступна"
+            
+            TABLES=$(mysql -h app-canary_db -u root -prootpassword appdb -e "SHOW TABLES" 2>/dev/null || echo "")
+            echo "Найдены таблицы:"
+            echo "$TABLES"
+            
+            if echo "$TABLES" | grep -q "users" && echo "$TABLES" | grep -q "workouts"; then
+                echo "✅ Обе таблицы найдены: users и workouts"
+                
+                USERS_COUNT=$(mysql -h app-canary_db -u root -prootpassword appdb -e "SELECT COUNT(*) FROM users" --batch --silent 2>/dev/null || echo "0")
+                WORKOUTS_COUNT=$(mysql -h app-canary_db -u root -prootpassword appdb -e "SELECT COUNT(*) FROM workouts" --batch --silent 2>/dev/null || echo "0")
+                
+                echo "Количество пользователей: $USERS_COUNT"
+                echo "Количество тренировок: $WORKOUTS_COUNT"
+                
+                exit 0
+            else
+                echo "❌ Не все таблицы найдены"
+                exit 1
+            fi
+        else
+            echo "❌ База appdb не доступна"
+            exit 1
+        fi
+    else
+        echo "⚠️ Не удалось подключиться, ждем 5 секунд..."
+        sleep 5
+    fi
+done
+echo "❌ Не удалось подключиться после $MAX_ATTEMPTS попыток"
+exit 1
+EOF
+                    
+                    chmod +x /tmp/test_mysql.sh
+                    
+                    echo "Запускаем тестовый контейнер в сети canary..."
+                    docker run --rm --network app-canary_default \
+                        -v /tmp/test_mysql.sh:/tmp/test_mysql.sh \
+                        --entrypoint /bin/bash \
+                        mysql:8.0 \
+                        /tmp/test_mysql.sh
+                    
+                    RESULT=$?
+                    rm -f /tmp/test_mysql.sh
+                    
+                    if [ $RESULT -eq 0 ]; then
+                        echo "✅ Проверка БД через сеть успешна!"
+                        exit 0
+                    else
+                        echo "❌ Не удалось проверить БД через сеть"
+                        echo "Логи сервиса БД:"
+                        docker service logs app-canary_db --tail 20
+                        exit 1
+                    fi
                 else
-                    echo "❌ Не все таблицы найдены"
-                    echo "Найдены таблицы:"
-                    echo "$TABLES"
+                    echo "✅ Контейнер найден: $DB_CONTAINER_ID"
                     
-                    echo "Проверяем структуру базы детальнее..."
-                    docker exec $DB_CONTAINER_ID mysql -u root -prootpassword -e "
-                        SELECT 
-                            table_schema,
-                            table_name,
-                            table_type
-                        FROM information_schema.tables 
-                        WHERE table_schema IN ('appdb', 'mysql', 'information_schema', 'performance_schema')
-                        ORDER BY table_schema, table_name;
-                    " 2>&1
+                    echo "5. Проверяем, что MySQL процесс работает внутри контейнера..."
+                    if docker exec $DB_CONTAINER_ID mysqladmin ping -u root -prootpassword 2>&1; then
+                        echo "✅ MySQL процесс работает"
+                    else
+                        echo "❌ MySQL процесс не работает"
+                        echo "Логи контейнера:"
+                        docker logs $DB_CONTAINER_ID --tail 10 2>&1
+                        exit 1
+                    fi
                     
-                    exit 1
+                    echo "6. Проверяем базы данных изнутри контейнера..."
+                    docker exec $DB_CONTAINER_ID mysql -u root -prootpassword -e "SHOW DATABASES;" 2>&1
+                    
+                    echo "7. Проверяем базу данных appdb..."
+                    docker exec $DB_CONTAINER_ID mysql -u root -prootpassword -e "USE appdb; SHOW TABLES;" 2>&1
+                    
+                    echo "8. Проверяем конкретные таблицы..."
+                    TABLES=$(docker exec $DB_CONTAINER_ID mysql -u root -prootpassword -e "USE appdb; SHOW TABLES;" --batch --silent 2>/dev/null || echo "")
+                    
+                    if echo "$TABLES" | grep -q "users" && echo "$TABLES" | grep -q "workouts"; then
+                        echo "✅ Обе таблицы найдены: users и workouts"
+                        
+                        echo "9. Проверяем количество записей..."
+                        USERS_COUNT=$(docker exec $DB_CONTAINER_ID mysql -u root -prootpassword -e "USE appdb; SELECT COUNT(*) FROM users;" --batch --silent 2>/dev/null || echo "0")
+                        WORKOUTS_COUNT=$(docker exec $DB_CONTAINER_ID mysql -u root -prootpassword -e "USE appdb; SELECT COUNT(*) FROM workouts;" --batch --silent 2>/dev/null || echo "0")
+                        
+                        echo "Количество пользователей: $USERS_COUNT"
+                        echo "Количество тренировок: $WORKOUTS_COUNT"
+                        
+                        if [ "$USERS_COUNT" -gt "0" ] && [ "$WORKOUTS_COUNT" -gt "0" ]; then
+                            echo "✅ Данные успешно загружены!"
+                        else
+                            echo "⚠️ В таблицах нет данных или не удалось их прочитать"
+                        fi
+                        
+                        echo "✅ ПРОВЕРКА УСПЕШНО ЗАВЕРШЕНА!"
+                        exit 0
+                    else
+                        echo "❌ Не все таблицы найдены"
+                        echo "Найдены таблицы:"
+                        echo "$TABLES"
+                        exit 1
+                    fi
                 fi
             '''
         }
     }
 }
+
         
         stage('Canary Testing') {
             steps {
