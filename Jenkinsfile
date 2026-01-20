@@ -157,82 +157,115 @@ pipeline {
 }
         
         stage('Check Database Structure') {
-            steps {
-                script {
-                    sh """
-                        echo "=== Проверка структуры БД Canary ==="
-                        export DOCKER_HOST="${DOCKER_HOST}"
+    steps {
+        script {
+            sh """
+                echo "=== ПРОВЕРКА БАЗЫ ДАННЫХ CANARY ==="
+                export DOCKER_HOST="${DOCKER_HOST}"
+                
+                echo "1. Даем время на выполнение init.sql..."
+                sleep 45
+                
+                echo "2. Проверка доступности MySQL..."
+                for i in \$(seq 1 10); do
+                    if docker run --rm \\
+                        --network ${CANARY_APP_NAME}_default \\
+                        mysql:8.0 \\
+                        mysqladmin ping -h db -u root -p${MYSQL_ROOT_PASSWORD} --silent 2>/dev/null; then
+                        echo "✅ MySQL доступен после \$i попыток"
+                        break
+                    fi
+                    echo "⏳ Ожидание MySQL... (\$i/10)"
+                    sleep 5
+                done
+                
+                echo "3. Проверка наличия базы данных appdb..."
+                
+                # Простой способ проверки - попробовать подключиться к базе
+                if docker run --rm \\
+                    --network ${CANARY_APP_NAME}_default \\
+                    mysql:8.0 \\
+                    mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} appdb -e "SELECT 1" 2>/dev/null; then
+                    echo "✅ База данных 'appdb' доступна"
+                    
+                    echo "4. Проверка таблиц..."
+                    TABLES=\$(docker run --rm \\
+                        --network ${CANARY_APP_NAME}_default \\
+                        mysql:8.0 \\
+                        mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} appdb -N -e "SHOW TABLES;" 2>/dev/null || echo "")
+                    
+                    echo "Найдены таблицы: '\${TABLES}'"
+                    
+                    if echo "\${TABLES}" | grep -q "users" && echo "\${TABLES}" | grep -q "workouts"; then
+                        echo "✅ Обе таблицы (users и workouts) существуют"
                         
-                        echo "1. Определение порта БД Canary..."
-                        # Получаем фактический порт БД из сервиса
-                        DB_PORT=\$(docker service ls --filter name=${CANARY_APP_NAME}_db --format "{{.Ports}}" 2>/dev/null | grep -o ":[0-9]*->" | grep -o "[0-9]*" || echo "3306")
+                        # Проверяем количество записей
+                        echo "5. Проверка количества записей..."
                         
-                        echo "Порт БД Canary: \${DB_PORT}"
-                        
-                        echo "2. Ожидание доступности MySQL..."
-                        MAX_RETRIES=30
-                        
-                        for i in \$(seq 1 \$MAX_RETRIES); do
-                            if timeout 10 docker run --rm \\
-                                --network ${CANARY_APP_NAME}_default \\
-                                mysql:8.0 \\
-                                mysqladmin ping -h db -u root -p${MYSQL_ROOT_PASSWORD} --silent 2>/dev/null; then
-                                echo "✅ MySQL доступен после \$i попыток"
-                                break
-                            fi
-                            
-                            echo "⏳ MySQL ещё не готов... (\$i/\$MAX_RETRIES)"
-                            sleep 5
-                            
-                            if [ \$i -eq \$MAX_RETRIES ]; then
-                                echo "❌ MySQL так и не стал доступен"
-                                echo "Проверяем логи БД:"
-                                docker service logs ${CANARY_APP_NAME}_db --tail 20 2>/dev/null || true
-                                echo "Проверяем состояние задач:"
-                                docker service ps ${CANARY_APP_NAME}_db --no-trunc 2>/dev/null || true
-                                exit 1
-                            fi
-                        done
-                        
-                        echo "3. Проверка наличия таблиц users и workouts"
-                        
-                        SQL="SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${MYSQL_DATABASE}' AND table_name IN ('users','workouts');"
-                        
-                        TABLE_COUNT=\$(docker run --rm \\
+                        USER_COUNT=\$(docker run --rm \\
                             --network ${CANARY_APP_NAME}_default \\
                             mysql:8.0 \\
-                            mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} -N -e "\$SQL" 2>/dev/null || echo "0")
+                            mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} appdb -N -e "SELECT COUNT(*) FROM users;" 2>/dev/null || echo "0")
                         
-                        echo "Найдено таблиц: \$TABLE_COUNT"
+                        WORKOUT_COUNT=\$(docker run --rm \\
+                            --network ${CANARY_APP_NAME}_default \\
+                            mysql:8.0 \\
+                            mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} appdb -N -e "SELECT COUNT(*) FROM workouts;" 2>/dev/null || echo "0")
                         
-                        if [ "\$TABLE_COUNT" -eq 2 ]; then
+                        echo "Количество пользователей: \${USER_COUNT}"
+                        echo "Количество тренировок: \${WORKOUT_COUNT}"
+                        
+                        if [ "\${USER_COUNT}" -gt 0 ] && [ "\${WORKOUT_COUNT}" -gt 0 ]; then
+                            echo "✅ Тестовые данные успешно загружены"
                             echo "✅ Структура БД корректна"
                         else
-                            echo "❌ Структура БД некорректна (ожидается 2 таблицы)"
-                            echo "Список всех таблиц в БД:"
+                            echo "⚠️  Таблицы созданы, но тестовые данные отсутствуют"
+                            echo "Проверяем структуру таблиц:"
+                            
+                            echo "Структура таблицы users:"
                             docker run --rm \\
                                 --network ${CANARY_APP_NAME}_default \\
                                 mysql:8.0 \\
-                                mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE} -e "SHOW TABLES;" 2>/dev/null || true
-                            exit 1
+                                mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} appdb -e "DESCRIBE users;" 2>/dev/null || true
+                            
+                            echo "Структура таблицы workouts:"
+                            docker run --rm \\
+                                --network ${CANARY_APP_NAME}_default \\
+                                mysql:8.0 \\
+                                mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} appdb -e "DESCRIBE workouts;" 2>/dev/null || true
+                            
+                            echo "✅ Структура БД корректна (данные могут быть не загружены)"
                         fi
                         
-                        echo "4. Проверка соединения веб-сервиса с БД..."
-                        
-                        # Тестируем соединение через веб-сервис
-                        curl -f -s --max-time 30 "http://${MANAGER_IP}:8081" > /dev/null
-        
-                        if [ \$? -eq 0 ]; then
-                            echo "✅ Веб-сервис успешно подключился к БД"
-                        else
-                            echo "⚠️  Проблемы с подключением веб-сервиса к БД"
-                            echo "Логи веб-сервиса:"
-                            docker service logs ${CANARY_APP_NAME}_web-server --tail 10 2>/dev/null || true
-                        fi
-                    """
-                }
-            }
+                    else
+                        echo "❌ Не все таблицы созданы"
+                        echo "Проверяем логи инициализации БД..."
+                        docker service logs ${CANARY_APP_NAME}_db --tail 100 2>/dev/null | grep -i "init\|executing\|error\|failed" || true
+                        exit 1
+                    fi
+                    
+                else
+                    echo "❌ Не удалось подключиться к базе 'appdb'"
+                    echo "Возможные причины:"
+                    echo "1. init.sql не выполнился"
+                    echo "2. База данных не создана"
+                    echo "3. Проблемы с подключением"
+                    
+                    echo "Список всех баз данных:"
+                    docker run --rm \\
+                        --network ${CANARY_APP_NAME}_default \\
+                        mysql:8.0 \\
+                        mysql -h db -u root -p${MYSQL_ROOT_PASSWORD} -e "SHOW DATABASES;" 2>/dev/null || true
+                    
+                    echo "Логи MySQL:"
+                    docker service logs ${CANARY_APP_NAME}_db --tail 50 2>/dev/null || true
+                    
+                    exit 1
+                fi
+            """
         }
+    }
+}
         
         stage('Canary Testing') {
             steps {
