@@ -10,7 +10,6 @@ services:
       - MYSQL_PASSWORD=userpassword
     volumes:
       - canary_mysql_data:/var/lib/mysql
-      - canary_mysql_config:/etc/mysql/conf.d
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
       interval: 5s
@@ -24,9 +23,6 @@ services:
         condition: on-failure
         delay: 5s
         max_attempts: 3
-      placement:
-        constraints:
-          - node.role != manager
 
   web-server:
     image: ${DOCKER_HUB_USER}/php-app:${BUILD_NUMBER}
@@ -39,6 +35,8 @@ services:
       - APP_ENV=canary
     ports:
       - "8081:80"
+    depends_on:
+      - db
     deploy:
       mode: replicated
       replicas: 1
@@ -46,12 +44,6 @@ services:
         condition: on-failure
         delay: 5s
         max_attempts: 3
-      placement:
-        constraints:
-          - node.role != manager
-    # Удаляем depends_on или используем простую версию
-    depends_on:
-      - db
 
 networks:
   default:
@@ -60,6 +52,4 @@ networks:
 
 volumes:
   canary_mysql_data:
-    driver: local
-  canary_mysql_config:
     driver: local
