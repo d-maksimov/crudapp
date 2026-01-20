@@ -39,8 +39,6 @@ services:
       - APP_ENV=canary
     ports:
       - "8081:80"
-    depends_on:
-      condition: service_healthy
     deploy:
       mode: replicated
       replicas: 1
@@ -51,6 +49,9 @@ services:
       placement:
         constraints:
           - node.role != manager
+    # Удаляем depends_on или используем простую версию
+    depends_on:
+      - db
 
 networks:
   default:
