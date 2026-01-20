@@ -3,6 +3,7 @@ version: '3.8'
 services:
   db:
     image: ${DOCKER_HUB_USER}/mysql-app:${BUILD_NUMBER}
+    command: --default-authentication-plugin=mysql_native_password
     environment:
       - MYSQL_ROOT_PASSWORD=rootpassword
       - MYSQL_DATABASE=appdb
@@ -12,17 +13,17 @@ services:
       - canary_mysql_data:/var/lib/mysql
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
-      interval: 5s
-      timeout: 3s
+      interval: 10s
+      timeout: 5s
       retries: 10
-      start_period: 30s
+      start_period: 40s
     deploy:
       mode: replicated
       replicas: 1
       restart_policy:
         condition: on-failure
-        delay: 5s
-        max_attempts: 3
+        delay: 10s
+        max_attempts: 5
 
   web-server:
     image: ${DOCKER_HUB_USER}/php-app:${BUILD_NUMBER}
@@ -35,8 +36,6 @@ services:
       - APP_ENV=canary
     ports:
       - "8081:80"
-    depends_on:
-      - db
     deploy:
       mode: replicated
       replicas: 1
