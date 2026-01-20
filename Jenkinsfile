@@ -21,7 +21,7 @@ pipeline {
         // Настройки базы данных
         MYSQL_ROOT_PASSWORD = 'rootpassword'
         MYSQL_APP_PASSWORD = 'userpassword'
-        MYSQL_DATABASE = 'appdb'  // Используем 'appdb' как в init.sql
+        MYSQL_DATABASE = 'appdb'
     }
     
     stages {
@@ -39,10 +39,10 @@ pipeline {
                         echo "=== Сборка Docker образов ==="
                         
                         echo "1. Сборка PHP образа..."
-                        docker build -f php.Dockerfile . -t \${DOCKER_HUB_USER}/\${BACKEND_IMAGE_NAME}:\${BUILD_NUMBER}
+                        docker build -f php.Dockerfile . -t ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:${BUILD_NUMBER}
                         
                         echo "2. Сборка MySQL образа..."
-                        docker build -f mysql.Dockerfile . -t \${DOCKER_HUB_USER}/\${DATABASE_IMAGE_NAME}:\${BUILD_NUMBER}
+                        docker build -f mysql.Dockerfile . -t ${DOCKER_HUB_USER}/${DATABASE_IMAGE_NAME}:${BUILD_NUMBER}
                         
                         echo "✅ Образы собраны"
                     """
@@ -65,21 +65,21 @@ pipeline {
                             echo "\${DOCKER_PASS}" | docker login -u "\${DOCKER_USER}" --password-stdin
                             
                             # Пушим образы с номером сборки
-                            echo "1. Публикация PHP образа с тегом \${BUILD_NUMBER}..."
-                            docker push \${DOCKER_HUB_USER}/\${BACKEND_IMAGE_NAME}:\${BUILD_NUMBER}
+                            echo "1. Публикация PHP образа с тегом ${BUILD_NUMBER}..."
+                            docker push ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:${BUILD_NUMBER}
                             
-                            echo "2. Публикация MySQL образа с тегом \${BUILD_NUMBER}..."
-                            docker push \${DOCKER_HUB_USER}/\${DATABASE_IMAGE_NAME}:\${BUILD_NUMBER}
+                            echo "2. Публикация MySQL образа с тегом ${BUILD_NUMBER}..."
+                            docker push ${DOCKER_HUB_USER}/${DATABASE_IMAGE_NAME}:${BUILD_NUMBER}
                             
                             # Добавляем тег latest
                             echo "3. Добавление тега latest..."
-                            docker tag \${DOCKER_HUB_USER}/\${BACKEND_IMAGE_NAME}:\${BUILD_NUMBER} \${DOCKER_HUB_USER}/\${BACKEND_IMAGE_NAME}:latest
-                            docker tag \${DOCKER_HUB_USER}/\${DATABASE_IMAGE_NAME}:\${BUILD_NUMBER} \${DOCKER_HUB_USER}/\${DATABASE_IMAGE_NAME}:latest
+                            docker tag ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:${BUILD_NUMBER} ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:latest
+                            docker tag ${DOCKER_HUB_USER}/${DATABASE_IMAGE_NAME}:${BUILD_NUMBER} ${DOCKER_HUB_USER}/${DATABASE_IMAGE_NAME}:latest
                             
                             # Пушим latest теги
                             echo "4. Публикация тегов latest..."
-                            docker push \${DOCKER_HUB_USER}/\${BACKEND_IMAGE_NAME}:latest
-                            docker push \${DOCKER_HUB_USER}/\${DATABASE_IMAGE_NAME}:latest
+                            docker push ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:latest
+                            docker push ${DOCKER_HUB_USER}/${DATABASE_IMAGE_NAME}:latest
                             
                             echo "✅ Образы успешно опубликованы"
                         """
@@ -91,22 +91,22 @@ pipeline {
         stage('Deploy Canary') {
             steps {
                 script {
-                    sh """
+                    sh '''
                         echo "=== Развёртывание Canary ==="
                         
                         # Экспортируем DOCKER_HOST для работы с Swarm
-                        export DOCKER_HOST="${DOCKER_HOST}"
+                        export DOCKER_HOST="tcp://192.168.0.1:2376"
                         
                         # Удаляем старый canary стек если есть
                         echo "1. Очистка предыдущего canary..."
-                        docker stack rm ${CANARY_APP_NAME} 2>/dev/null || true
+                        docker stack rm app-canary 2>/dev/null || true
                         sleep 15
                         
                         # Подготавливаем docker-compose файл для canary
                         echo "2. Подготовка docker-compose для canary..."
                         cp docker-compose_canary.yaml docker-compose_canary_temp.yaml
-                        sed -i "s/\\\${BUILD_NUMBER}/\${BUILD_NUMBER}/g" docker-compose_canary_temp.yaml
-                        sed -i "s/\\\${DOCKER_HUB_USER}/\${DOCKER_HUB_USER}/g" docker-compose_canary_temp.yaml
+                        sed -i "s/\\${BUILD_NUMBER}/''' + "${BUILD_NUMBER}" + '''/g" docker-compose_canary_temp.yaml
+                        sed -i "s/\\${DOCKER_HUB_USER}/danil221/g" docker-compose_canary_temp.yaml
                         
                         echo "3. Проверка конфигурации:"
                         echo "---"
@@ -115,30 +115,30 @@ pipeline {
                         
                         # Разворачиваем canary
                         echo "4. Развертывание canary стека..."
-                        docker stack deploy -c docker-compose_canary_temp.yaml ${CANARY_APP_NAME} --with-registry-auth
+                        docker stack deploy -c docker-compose_canary_temp.yaml app-canary --with-registry-auth
                         
                         # Ждем запуска сервисов
                         echo "5. Ожидание запуска canary сервисов..."
                         TIMEOUT=180  # 3 минуты
-                        START_TIME=\$(date +%s)
+                        START_TIME=$(date +%s)
                         
                         while true; do
-                            CURRENT_TIME=\$(date +%s)
-                            ELAPSED=\$((CURRENT_TIME - START_TIME))
+                            CURRENT_TIME=$(date +%s)
+                            ELAPSED=$((CURRENT_TIME - START_TIME))
                             
-                            if [ \$ELAPSED -ge \$TIMEOUT ]; then
+                            if [ $ELAPSED -ge $TIMEOUT ]; then
                                 echo "❌ Таймаут ожидания запуска canary"
                                 echo "Статус сервисов:"
-                                docker service ls --filter name=${CANARY_APP_NAME}
+                                docker service ls --filter name=app-canary
                                 exit 1
                             fi
                             
-                            DB_STATUS=\$(docker service ls --filter name=${CANARY_APP_NAME}_db --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
-                            WEB_STATUS=\$(docker service ls --filter name=${CANARY_APP_NAME}_web-server --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
+                            DB_STATUS=$(docker service ls --filter name=app-canary_db --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
+                            WEB_STATUS=$(docker service ls --filter name=app-canary_web-server --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
                             
-                            echo "  DB: \${DB_STATUS}, Web: \${WEB_STATUS}"
+                            echo "  DB: ${DB_STATUS}, Web: ${WEB_STATUS}"
                             
-                            if echo "\${DB_STATUS}" | grep -q "1/1" && echo "\${WEB_STATUS}" | grep -q "1/1"; then
+                            if echo "${DB_STATUS}" | grep -q "1/1" && echo "${WEB_STATUS}" | grep -q "1/1"; then
                                 echo "✅ Canary сервисы запущены"
                                 break
                             fi
@@ -151,7 +151,7 @@ pipeline {
                         sleep 45
                         
                         echo "✅ Canary развернут на порту 8081"
-                    """
+                    '''
                 }
             }
         }
@@ -159,13 +159,13 @@ pipeline {
         stage('Check Database Structure') {
             steps {
                 script {
-                    sh """
+                    sh '''
                         echo "=== Проверка структуры базы данных ==="
                         
-                        export DOCKER_HOST="${DOCKER_HOST}"
+                        export DOCKER_HOST="tcp://192.168.0.1:2376"
                         
                         # SQL для проверки таблиц
-                        cat > /tmp/check_db.sql << 'EOF'
+                        cat > /tmp/check_db.sql << "EOF"
 -- Проверяем наличие таблиц
 SELECT 
     COUNT(CASE WHEN table_name = 'users' THEN 1 END) as has_users,
@@ -176,30 +176,30 @@ EOF
                         
                         # Пробуем подключиться несколько раз
                         echo "Проверка структуры БД canary..."
-                        for attempt in {1..6}; do
-                            echo "Попытка \$attempt из 6..."
+                        for attempt in 1 2 3 4 5 6; do
+                            echo "Попытка $attempt из 6..."
                             
                             # Проверяем доступность БД
-                            if docker run --rm --network ${CANARY_APP_NAME}_default \\
-                                mysql:8.0 mysql -h ${CANARY_APP_NAME}_db -u root -p\${MYSQL_ROOT_PASSWORD} \\
+                            if docker run --rm --network app-canary_default \\
+                                mysql:8.0 mysql -h app-canary_db -u root -prootpassword \\
                                 -e "SELECT 1;" --connect-timeout=15 2>/dev/null; then
                                 
                                 echo "✅ Подключение к БД успешно"
                                 
                                 # Проверяем таблицы
-                                RESULT=\$(docker run --rm --network ${CANARY_APP_NAME}_default \\
+                                RESULT=$(docker run --rm --network app-canary_default \\
                                     -v /tmp/check_db.sql:/tmp/check_db.sql \\
-                                    mysql:8.0 mysql -h ${CANARY_APP_NAME}_db -u root -p\${MYSQL_ROOT_PASSWORD} appdb \\
+                                    mysql:8.0 mysql -h app-canary_db -u root -prootpassword appdb \\
                                     -e "source /tmp/check_db.sql" --batch --silent 2>/dev/null || echo "0 0")
                                 
-                                HAS_USERS=\$(echo \$RESULT | awk '{print \$1}')
-                                HAS_WORKOUTS=\$(echo \$RESULT | awk '{print \$2}')
+                                HAS_USERS=$(echo $RESULT | awk '{print $1}')
+                                HAS_WORKOUTS=$(echo $RESULT | awk '{print $2}')
                                 
                                 echo "Результат проверки:"
-                                echo "  Таблица 'users': \$HAS_USERS"
-                                echo "  Таблица 'workouts': \$HAS_WORKOUTS"
+                                echo "  Таблица 'users': $HAS_USERS"
+                                echo "  Таблица 'workouts': $HAS_WORKOUTS"
                                 
-                                if [ "\$HAS_USERS" = "1" ] && [ "\$HAS_WORKOUTS" = "1" ]; then
+                                if [ "$HAS_USERS" = "1" ] && [ "$HAS_WORKOUTS" = "1" ]; then
                                     echo "✅ Структура БД корректна"
                                     rm -f /tmp/check_db.sql
                                     exit 0
@@ -218,7 +218,7 @@ EOF
                         echo "❌ Не удалось проверить структуру БД"
                         rm -f /tmp/check_db.sql
                         exit 1
-                    """
+                    '''
                 }
             }
         }
@@ -226,37 +226,38 @@ EOF
         stage('Canary Testing') {
             steps {
                 script {
-                    sh """
+                    sh '''
                         echo "=== Тестирование Canary ==="
                         
-                        export DOCKER_HOST="${DOCKER_HOST}"
+                        export DOCKER_HOST="tcp://192.168.0.1:2376"
                         
                         SUCCESS=0
                         TOTAL_TESTS=5
-                        CANARY_URL="http://${MANAGER_IP}:8081"
+                        CANARY_URL="http://192.168.0.1:8081"
                         
-                        echo "Тестирование canary по адресу: \${CANARY_URL}"
+                        echo "Тестирование canary по адресу: ${CANARY_URL}"
                         
-                        for i in \$(seq 1 \${TOTAL_TESTS}); do
+                        for i in 1 2 3 4 5; do
                             echo ""
-                            echo "Тест \$i/\${TOTAL_TESTS}:"
+                            echo "Тест $i/${TOTAL_TESTS}:"
                             
                             # Пробуем получить главную страницу
-                            if curl -f -s --max-time 30 \${CANARY_URL} > /tmp/canary_test_\${i}.html 2>/dev/null; then
-                                SIZE=\$(wc -c < /tmp/canary_test_\${i}.html)
-                                echo "  ✓ Страница загружена (\${SIZE} байт)"
+                            if curl -f -s --max-time 30 ${CANARY_URL} > /tmp/canary_test_${i}.html 2>/dev/null; then
+                                SIZE=$(wc -c < /tmp/canary_test_${i}.html)
+                                echo "  ✓ Страница загружена (${SIZE} байт)"
                                 
-                                # Проверяем на наличие ошибок
-                                if ! grep -q -i "error\|fatal\|exception\|failed\|syntax\|warning" /tmp/canary_test_\${i}.html 2>/dev/null; then
-                                    SUCCESS=\$((SUCCESS + 1))
+                                # Проверяем на наличие ошибок - используем экранирование через переменную
+                                ERROR_PATTERN="error|fatal|exception|failed|syntax|warning"
+                                if ! grep -q -i "${ERROR_PATTERN}" /tmp/canary_test_${i}.html 2>/dev/null; then
+                                    SUCCESS=$((SUCCESS + 1))
                                     echo "  ✓ Контент без ошибок"
                                 else
                                     echo "  ⚠️ Найдены ошибки в контенте"
-                                    grep -i "error\|fatal\|exception" /tmp/canary_test_\${i}.html 2>/dev/null | head -3
+                                    grep -i "${ERROR_PATTERN}" /tmp/canary_test_${i}.html 2>/dev/null | head -3
                                 fi
                             else
-                                CURL_EXIT=\$?
-                                echo "  ❌ Не удалось загрузить страницу (код: \${CURL_EXIT})"
+                                CURL_EXIT=$?
+                                echo "  ❌ Не удалось загрузить страницу (код: ${CURL_EXIT})"
                             fi
                             
                             sleep 5
@@ -264,17 +265,17 @@ EOF
                         
                         echo ""
                         echo "=== Результаты тестирования Canary ==="
-                        echo "Успешных тестов: \${SUCCESS}/\${TOTAL_TESTS}"
+                        echo "Успешных тестов: ${SUCCESS}/${TOTAL_TESTS}"
                         
-                        if [ \${SUCCESS} -ge 3 ]; then
+                        if [ ${SUCCESS} -ge 3 ]; then
                             echo "✅ Canary прошел тестирование!"
                         else
                             echo "❌ Canary не прошел тестирование"
                             echo "Последний ответ сервера:"
-                            cat /tmp/canary_test_\${TOTAL_TESTS}.html 2>/dev/null | head -50
+                            cat /tmp/canary_test_${TOTAL_TESTS}.html 2>/dev/null | head -50
                             exit 1
                         fi
-                    """
+                    '''
                 }
             }
         }
@@ -282,17 +283,17 @@ EOF
         stage('Deploy to Production') {
             steps {
                 script {
-                    sh """
+                    sh '''
                         echo "=== Развертывание в Production ==="
                         
-                        export DOCKER_HOST="${DOCKER_HOST}"
+                        export DOCKER_HOST="tcp://192.168.0.1:2376"
                         
                         echo "1. Проверка текущих сервисов..."
                         docker service ls --filter name=app_
                         
                         echo "2. Обновление web сервиса..."
                         docker service update \\
-                            --image \${DOCKER_HUB_USER}/\${BACKEND_IMAGE_NAME}:latest \\
+                            --image danil221/php-app:latest \\
                             --update-parallelism 1 \\
                             --update-delay 10s \\
                             --with-registry-auth \\
@@ -302,10 +303,10 @@ EOF
                         sleep 60
                         
                         echo "4. Проверка статуса обновления..."
-                        docker service ps app_web --format "table {{.Name}}\\t{{.CurrentState}}\\t{{.Image}}" | head -10
+                        docker service ps app_web --format "table {{.Name}}\t{{.CurrentState}}\t{{.Image}}" | head -10
                         
                         echo "✅ Production обновлен!"
-                    """
+                    '''
                 }
             }
         }
@@ -313,27 +314,29 @@ EOF
         stage('Final Verification') {
             steps {
                 script {
-                    sh """
+                    sh '''
                         echo "=== Финальная проверка Production ==="
                         
-                        export DOCKER_HOST="${DOCKER_HOST}"
+                        export DOCKER_HOST="tcp://192.168.0.1:2376"
                         
                         SUCCESS=0
                         TOTAL_TESTS=5
-                        PROD_URL="http://${MANAGER_IP}:80"
+                        PROD_URL="http://192.168.0.1:80"
                         
-                        echo "Тестирование production по адресу: \${PROD_URL}"
+                        echo "Тестирование production по адресу: ${PROD_URL}"
                         
-                        for i in \$(seq 1 \${TOTAL_TESTS}); do
+                        for i in 1 2 3 4 5; do
                             echo ""
-                            echo "Тест \$i/\${TOTAL_TESTS}:"
+                            echo "Тест $i/${TOTAL_TESTS}:"
                             
-                            if curl -f -s --max-time 30 \${PROD_URL} > /tmp/prod_test_\${i}.html 2>/dev/null; then
-                                SIZE=\$(wc -c < /tmp/prod_test_\${i}.html)
-                                echo "  ✓ Страница загружена (\${SIZE} байт)"
+                            if curl -f -s --max-time 30 ${PROD_URL} > /tmp/prod_test_${i}.html 2>/dev/null; then
+                                SIZE=$(wc -c < /tmp/prod_test_${i}.html)
+                                echo "  ✓ Страница загружена (${SIZE} байт)"
                                 
-                                if ! grep -q -i "error\|fatal\|exception\|failed\|syntax\|warning" /tmp/prod_test_\${i}.html 2>/dev/null; then
-                                    SUCCESS=\$((SUCCESS + 1))
+                                # Используем переменную для паттерна поиска
+                                ERROR_PATTERN="error|fatal|exception|failed|syntax|warning"
+                                if ! grep -q -i "${ERROR_PATTERN}" /tmp/prod_test_${i}.html 2>/dev/null; then
+                                    SUCCESS=$((SUCCESS + 1))
                                     echo "  ✓ Контент без ошибок"
                                 else
                                     echo "  ⚠️ Найдены ошибки в контенте"
@@ -347,9 +350,9 @@ EOF
                         
                         echo ""
                         echo "=== Результаты финальной проверки ==="
-                        echo "Успешных тестов: \${SUCCESS}/\${TOTAL_TESTS}"
+                        echo "Успешных тестов: ${SUCCESS}/${TOTAL_TESTS}"
                         
-                        if [ \${SUCCESS} -ge 3 ]; then
+                        if [ ${SUCCESS} -ge 3 ]; then
                             echo "✅ Production работает корректно!"
                         else
                             echo "❌ Проблемы с production"
@@ -357,7 +360,7 @@ EOF
                             docker service logs app_web --tail 30 2>/dev/null || true
                             exit 1
                         fi
-                    """
+                    '''
                 }
             }
         }
@@ -365,26 +368,26 @@ EOF
         stage('Cleanup Canary') {
             steps {
                 script {
-                    sh """
+                    sh '''
                         echo "=== Удаление Canary ==="
                         
-                        export DOCKER_HOST="${DOCKER_HOST}"
+                        export DOCKER_HOST="tcp://192.168.0.1:2376"
                         
                         echo "1. Удаление canary стека..."
-                        docker stack rm ${CANARY_APP_NAME} 2>/dev/null || true
+                        docker stack rm app-canary 2>/dev/null || true
                         
                         echo "2. Ожидание удаления..."
                         sleep 20
                         
                         echo "3. Проверка удаления..."
-                        if docker stack ls | grep -q ${CANARY_APP_NAME}; then
+                        if docker stack ls | grep -q app-canary; then
                             echo "⚠️ Canary стек еще существует, повторная попытка..."
-                            docker stack rm ${CANARY_APP_NAME} 2>/dev/null || true
+                            docker stack rm app-canary 2>/dev/null || true
                             sleep 10
                         fi
                         
                         echo "✅ Canary успешно удален"
-                    """
+                    '''
                 }
             }
         }
@@ -411,7 +414,7 @@ EOF
                 sh '''
                     echo "=== Аварийная очистка ==="
                     
-                    export DOCKER_HOST="${DOCKER_HOST}" 2>/dev/null || true
+                    export DOCKER_HOST="tcp://192.168.0.1:2376" 2>/dev/null || true
                     
                     echo "1. Удаление canary при ошибке..."
                     docker stack rm app-canary 2>/dev/null || true
