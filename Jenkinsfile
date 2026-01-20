@@ -114,21 +114,52 @@ pipeline {
             sh '''
                 echo "Проверка наличия таблиц 'users' и 'workouts'..."
                 
-                # Находим контейнер БД
-                CONTAINER_ID=$(docker ps -q --filter "name=app-canary_db")
+                # 1. Находим контейнер БД по сервису или другим признакам
+                # Способ 1: Ищем контейнер с образом mysql-app
+                CONTAINER_ID=$(docker ps --filter "ancestor=danil221/mysql-app" --format "{{.ID}}" | head -1)
+                
+                # Способ 2: Если не нашли, ищем по лейблу сервиса
+                if [ -z "$CONTAINER_ID" ]; then
+                    CONTAINER_ID=$(docker ps --filter "label=com.docker.stack.namespace=app-canary" --filter "label=com.docker.swarm.service.name=app-canary_db" --format "{{.ID}}" | head -1)
+                fi
+                
+                # Способ 3: Если все еще не нашли, ищем любой mysql контейнер
+                if [ -z "$CONTAINER_ID" ]; then
+                    CONTAINER_ID=$(docker ps --filter "name=mysql" --format "{{.ID}}" | head -1)
+                fi
                 
                 if [ -z "$CONTAINER_ID" ]; then
                     echo "❌ Контейнер БД не найден"
+                    echo "Список всех контейнеров:"
+                    docker ps --format "table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}"
                     exit 1
                 fi
                 
-                # Проверяем подключение к БД
+                echo "Найден контейнер БД: $CONTAINER_ID"
+                echo "Информация о контейнере:"
+                docker inspect $CONTAINER_ID --format "{{.Name}} {{.Config.Image}} {{.State.Status}}"
+                
+                # 2. Проверяем подключение к БД
+                echo "Проверка подключения к БД..."
                 if ! docker exec $CONTAINER_ID mysql -u root -prootpassword -e "SELECT 1;" 2>/dev/null; then
                     echo "❌ Не удалось подключиться к БД"
+                    echo "Логи контейнера:"
+                    docker logs $CONTAINER_ID --tail 20
                     exit 1
                 fi
                 
-                # Проверяем наличие обеих таблиц за один запрос
+                # 3. Проверяем наличие базы данных appdb
+                echo "Проверка наличия базы данных 'appdb'..."
+                if docker exec $CONTAINER_ID mysql -u root -prootpassword -e "SHOW DATABASES;" 2>/dev/null | grep -q "appdb"; then
+                    echo "✅ База данных 'appdb' существует"
+                else
+                    echo "❌ База данных 'appdb' не найдена"
+                    exit 1
+                fi
+                
+                # 4. Проверяем наличие обеих таблиц за один запрос
+                echo "Проверка наличия таблиц 'users' и 'workouts'..."
+                
                 TABLE_CHECK=$(docker exec $CONTAINER_ID mysql -u root -prootpassword appdb -e "
                     SELECT 
                         SUM(CASE WHEN table_name = 'users' THEN 1 ELSE 0 END) as has_users,
@@ -147,14 +178,38 @@ pipeline {
                 if [ "$HAS_USERS" = "1" ] && [ "$HAS_WORKOUTS" = "1" ]; then
                     echo "✅ Обе таблицы существуют: users и workouts"
                     echo "✅ Структура БД корректна"
+                    
+                    # 5. Дополнительная проверка: количество записей
+                    echo "Проверка тестовых данных..."
+                    
+                    USERS_COUNT=$(docker exec $CONTAINER_ID mysql -u root -prootpassword appdb -e "
+                        SELECT COUNT(*) FROM users;
+                    " --batch --silent 2>/dev/null || echo "0")
+                    
+                    WORKOUTS_COUNT=$(docker exec $CONTAINER_ID mysql -u root -prootpassword appdb -e "
+                        SELECT COUNT(*) FROM workouts;
+                    " --batch --silent 2>/dev/null || echo "0")
+                    
+                    echo "Записей в таблице 'users': $USERS_COUNT"
+                    echo "Записей в таблице 'workouts': $WORKOUTS_COUNT"
+                    
+                    if [ "$USERS_COUNT" -gt 0 ] && [ "$WORKOUTS_COUNT" -gt 0 ]; then
+                        echo "✅ Тестовые данные присутствуют"
+                    else
+                        echo "⚠️ Мало или нет тестовых данных"
+                    fi
+                    
                 elif [ "$HAS_USERS" = "1" ] && [ "$HAS_WORKOUTS" = "0" ]; then
                     echo "❌ ОШИБКА: Отсутствует таблица 'workouts'"
+                    echo "Проверьте init.sql файл"
                     exit 1
                 elif [ "$HAS_USERS" = "0" ] && [ "$HAS_WORKOUTS" = "1" ]; then
                     echo "❌ ОШИБКА: Отсутствует таблица 'users'"
+                    echo "Проверьте init.sql файл"
                     exit 1
                 else
                     echo "❌ ОШИБКА: Отсутствуют обе таблицы"
+                    echo "Проверьте init.sql файл"
                     exit 1
                 fi
             '''
