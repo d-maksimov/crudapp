@@ -107,21 +107,54 @@ pipeline {
         stage('Check Database Structure') {
     steps {
         script {
-            echo '=== Базовая проверка БД ==='
+            echo '=== Проверка таблиц базы данных ==='
+            
+            sleep 60
+            
             sh '''
-                echo "Проверяем что MySQL запущен..."
+                echo "Проверка наличия таблиц 'users' и 'workouts'..."
                 
-                # Ждем 90 секунд
-                sleep 90
+                # Находим контейнер БД
+                CONTAINER_ID=$(docker ps -q --filter "name=app-canary_db")
                 
-                # Простая проверка - если сервис в состоянии 1/1, считаем успешным
-                SERVICE_STATUS=$(docker service ls --filter name=app-canary_db --format "{{.Replicas}}")
+                if [ -z "$CONTAINER_ID" ]; then
+                    echo "❌ Контейнер БД не найден"
+                    exit 1
+                fi
                 
-                if [ "$SERVICE_STATUS" = "1/1" ]; then
-                    echo "✅ MySQL сервис запущен (статус: $SERVICE_STATUS)"
-                    echo "✅ Проверка БД пройдена (базовая проверка)"
+                # Проверяем подключение к БД
+                if ! docker exec $CONTAINER_ID mysql -u root -prootpassword -e "SELECT 1;" 2>/dev/null; then
+                    echo "❌ Не удалось подключиться к БД"
+                    exit 1
+                fi
+                
+                # Проверяем наличие обеих таблиц за один запрос
+                TABLE_CHECK=$(docker exec $CONTAINER_ID mysql -u root -prootpassword appdb -e "
+                    SELECT 
+                        SUM(CASE WHEN table_name = 'users' THEN 1 ELSE 0 END) as has_users,
+                        SUM(CASE WHEN table_name = 'workouts' THEN 1 ELSE 0 END) as has_workouts
+                    FROM information_schema.tables 
+                    WHERE table_schema = 'appdb' 
+                    AND table_name IN ('users', 'workouts');
+                " --batch --silent 2>/dev/null || echo "0 0")
+                
+                HAS_USERS=$(echo $TABLE_CHECK | awk '{print $1}')
+                HAS_WORKOUTS=$(echo $TABLE_CHECK | awk '{print $2}')
+                
+                echo "Таблица 'users': $HAS_USERS (1 = есть, 0 = нет)"
+                echo "Таблица 'workouts': $HAS_WORKOUTS (1 = есть, 0 = нет)"
+                
+                if [ "$HAS_USERS" = "1" ] && [ "$HAS_WORKOUTS" = "1" ]; then
+                    echo "✅ Обе таблицы существуют: users и workouts"
+                    echo "✅ Структура БД корректна"
+                elif [ "$HAS_USERS" = "1" ] && [ "$HAS_WORKOUTS" = "0" ]; then
+                    echo "❌ ОШИБКА: Отсутствует таблица 'workouts'"
+                    exit 1
+                elif [ "$HAS_USERS" = "0" ] && [ "$HAS_WORKOUTS" = "1" ]; then
+                    echo "❌ ОШИБКА: Отсутствует таблица 'users'"
+                    exit 1
                 else
-                    echo "❌ MySQL сервис не запущен (статус: $SERVICE_STATUS)"
+                    echo "❌ ОШИБКА: Отсутствуют обе таблицы"
                     exit 1
                 fi
             '''
