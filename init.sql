@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS workouts (
     duration INT,
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-   -- FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Тестовые данные (РАСКОММЕНТИРУЙТЕ И users ИЛИ ЗАКОММЕНТИРУЙТЕ workouts)
