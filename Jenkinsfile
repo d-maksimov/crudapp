@@ -163,85 +163,90 @@ pipeline {
         }
         
         // Этап 5: Canary развертывание
-        stage('Deploy Canary') {
-            steps {
-                script {
-                    sh '''
-                        echo "=== РАЗВЕРТЫВАНИЕ CANARY ==="
+       stage('Deploy Canary') {
+    steps {
+        script {
+            sh '''
+                echo "=== РАЗВЕРТЫВАНИЕ CANARY ==="
+                
+                export DOCKER_HOST="tcp://192.168.0.1:2376"
+                
+                echo "1. Очистка предыдущего canary..."
+                docker stack rm app-canary 2>/dev/null || true
+                sleep 15
+                
+                echo "2. Очистка volume'ов MySQL..."
+                docker volume rm app-canary_canary_mysql_data 2>/dev/null || true
+                
+                echo "3. Используем порт 3307 для canary MySQL чтобы избежать конфликтов..."
+                CANARY_DB_PORT="3307"
+                
+                echo "4. Подготовка docker-compose для canary..."
+                if [ ! -f "docker-compose_canary.yaml" ]; then
+                    echo "❌ Файл docker-compose_canary.yaml не найден!"
+                    exit 1
+                fi
+                
+                cp docker-compose_canary.yaml docker-compose_canary_temp.yaml
+                
+                # Заменяем переменные в файле
+                sed -i "s/\\\${BUILD_NUMBER}/${BUILD_NUMBER}/g" docker-compose_canary_temp.yaml
+                sed -i "s/\\\${DOCKER_HUB_USER}/${DOCKER_HUB_USER}/g" docker-compose_canary_temp.yaml
+                sed -i "s/3306:3306/${CANARY_DB_PORT}:3306/g" docker-compose_canary_temp.yaml
+                
+                echo "5. Развертывание canary стека..."
+                docker stack deploy -c docker-compose_canary_temp.yaml app-canary --with-registry-auth
+                
+                echo "6. Ожидание запуска canary сервисов (макс. 180 сек)..."
+                TIMEOUT=180
+                START_TIME=$(date +%s)
+                
+                while true; do
+                    CURRENT_TIME=$(date +%s)
+                    ELAPSED=$((CURRENT_TIME - START_TIME))
+                    
+                    if [ $ELAPSED -ge $TIMEOUT ]; then
+                        echo "⚠️  Таймаут ожидания запуска canary, продолжаем для проверки ошибок БД..."
                         
-                        export DOCKER_HOST="tcp://192.168.0.1:2376"
+                        # Показываем статус, но НЕ завершаем пайплайн здесь
+                        echo "Статус сервисов:"
+                        docker service ls --filter name=app-canary
                         
-                        echo "1. Очистка предыдущего canary..."
-                        docker stack rm app-canary 2>/dev/null || true
-                        sleep 15
+                        # Проверяем, есть ли хоть что-то запущенное
+                        DB_STATUS=$(docker service ls --filter name=app-canary_db --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
+                        WEB_STATUS=$(docker service ls --filter name=app-canary_web-server --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
                         
-                        echo "2. Очистка volume'ов MySQL..."
-                        docker volume rm app-canary_canary_mysql_data 2>/dev/null || true
-                        
-                        echo "3. Проверка занятых портов..."
-                        # Проверяем порт 3306 для MySQL
-                        if docker service ls --format "{{.Ports}}" | grep -q ":3306->"; then
-                            echo "   ⚠️  Порт 3306 занят, используем 3307 для canary"
-                            CANARY_DB_PORT="3307"
+                        if [ "$WEB_STATUS" = "1/1" ]; then
+                            echo "   ✅ Web сервер запущен, продолжаем проверку БД"
+                            break
                         else
-                            echo "   ✅ Порт 3306 свободен"
-                            CANARY_DB_PORT="3306"
-                        fi
-                        
-                        echo "4. Подготовка docker-compose для canary..."
-                        if [ ! -f "docker-compose_canary.yaml" ]; then
-                            echo "❌ Файл docker-compose_canary.yaml не найден!"
+                            echo "❌ Web сервер тоже не запущен, выходим"
                             exit 1
                         fi
-                        
-                        cp docker-compose_canary.yaml docker-compose_canary_temp.yaml
-                        
-                        # Заменяем переменные в файле
-                        sed -i "s/\\\${BUILD_NUMBER}/${BUILD_NUMBER}/g" docker-compose_canary_temp.yaml
-                        sed -i "s/\\\${DOCKER_HUB_USER}/${DOCKER_HUB_USER}/g" docker-compose_canary_temp.yaml
-                        sed -i "s/3306:3306/${CANARY_DB_PORT}:3306/g" docker-compose_canary_temp.yaml
-                        
-                        echo "5. Развертывание canary стека..."
-                        docker stack deploy -c docker-compose_canary_temp.yaml app-canary --with-registry-auth
-                        
-                        echo "6. Ожидание запуска canary сервисов (макс. 240 сек)..."
-                        TIMEOUT=240
-                        START_TIME=$(date +%s)
-                        
-                        while true; do
-                            CURRENT_TIME=$(date +%s)
-                            ELAPSED=$((CURRENT_TIME - START_TIME))
-                            
-                            if [ $ELAPSED -ge $TIMEOUT ]; then
-                                echo "❌ Таймаут ожидания запуска canary"
-                                docker service ls --filter name=app-canary
-                                exit 1
-                            fi
-                            
-                            DB_STATUS=$(docker service ls --filter name=app-canary_db --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
-                            WEB_STATUS=$(docker service ls --filter name=app-canary_web-server --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
-                            
-                            echo "   DB: ${DB_STATUS}, Web: ${WEB_STATUS} (прошло ${ELAPSED} сек)"
-                            
-                            if echo "${DB_STATUS}" | grep -q "1/1" && echo "${WEB_STATUS}" | grep -q "1/1"; then
-                                echo "✅ Canary сервисы запущены"
-                                break
-                            fi
-                            
-                            sleep 10
-                        done
-                        
-                        echo "7. Ожидание полной инициализации БД (45 сек)..."
-                        sleep 45
-                        
-                        echo "✅ Canary развернут:"
-                        echo "   • Веб-сервис: http://192.168.0.1:8081"
-                        echo "   • MySQL порт: ${CANARY_DB_PORT}"
-                        docker service ls --filter name=app-canary
-                    '''
-                }
-            }
+                    fi
+                    
+                    DB_STATUS=$(docker service ls --filter name=app-canary_db --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
+                    WEB_STATUS=$(docker service ls --filter name=app-canary_web-server --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
+                    
+                    echo "   DB: ${DB_STATUS}, Web: ${WEB_STATUS} (прошло ${ELAPSED} сек)"
+                    
+                    # Если web запущен, продолжаем (даже если DB не запустился)
+                    if echo "${WEB_STATUS}" | grep -q "1/1"; then
+                        echo "✅ Web сервер запущен, продолжаем (даже если MySQL имеет проблемы)"
+                        break
+                    fi
+                    
+                    sleep 10
+                done
+                
+                echo "✅ Canary развернут (Web сервер работает):"
+                echo "   • Веб-сервис: http://192.168.0.1:8081"
+                echo "   • MySQL порт: ${CANARY_DB_PORT}"
+                docker service ls --filter name=app-canary
+            '''
         }
+    }
+}
         
         // Этап 6: СТРОГАЯ проверка базы данных Canary
         stage('Strict Check Canary Database') {
