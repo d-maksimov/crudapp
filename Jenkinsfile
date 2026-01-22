@@ -136,56 +136,92 @@ pipeline {
     }
 }
         
-        stage('Test Database Inside Container') {
-            steps {
-                script {
-                    sh '''
-                    echo "=== Testing Database Inside Container ==="
-                    export DOCKER_HOST="tcp://192.168.0.1:2376"
-                    
-                    MYSQL_CONTAINER=$(docker ps -q --filter "name=app-canary_db")
-                    
-                    if [ -z "$MYSQL_CONTAINER" ]; then
-                        echo "❌ No MySQL container found"
-                        exit 1
-                    fi
-                    
-                    echo "1. Test basic MySQL connection..."
-                    if docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "SELECT 1" 2>/dev/null; then
-                        echo "✅ MySQL is running inside container"
-                    else
-                        echo "❌ MySQL not responding inside container"
-                        exit 1
-                    fi
-                    
-                    echo "2. Check all databases..."
-                    docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "SHOW DATABASES;" 2>/dev/null || echo "Cannot show databases"
-                    
-                    echo "3. Check appdb specifically..."
-                    if docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "USE appdb; SHOW TABLES;" 2>/dev/null; then
-                        echo "✅ appdb database exists with tables"
-                        
-                        # Check specific tables
-                        USERS_EXISTS=$(docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword appdb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='appdb' AND table_name='users';" 2>/dev/null || echo "0")
-                        WORKOUTS_EXISTS=$(docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword appdb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='appdb' AND table_name='workouts';" 2>/dev/null || echo "0")
-                        
-                        echo "Users table: $USERS_EXISTS"
-                        echo "Workouts table: $WORKOUTS_EXISTS"
-                        
-                        if [ "$USERS_EXISTS" = "1" ] && [ "$WORKOUTS_EXISTS" = "1" ]; then
-                            echo "✅ Both tables created successfully!"
-                        else
-                            echo "❌ Tables missing"
-                            exit 1
-                        fi
-                    else
-                        echo "❌ appdb database not found or empty"
-                        exit 1
-                    fi
-                    '''
-                }
-            }
+          stage('Test Database Inside Container') {
+    steps {
+        script {
+            sh '''
+            echo "=== Testing Database Inside Container ==="
+            export DOCKER_HOST="tcp://192.168.0.1:2376"
+            
+            echo "1. Find the CORRECT MySQL container..."
+            
+            # Находим контейнер по имени образа и статусу
+            MYSQL_CONTAINER=$(docker ps --format "{{.ID}} {{.Names}} {{.Image}} {{.Status}}" | grep "mysql-app" | grep -v "app_db" | awk '{print $1}' | head -1)
+            
+            if [ -z "$MYSQL_CONTAINER" ]; then
+                echo "Trying different search - look for 'canary' in name..."
+                MYSQL_CONTAINER=$(docker ps --format "{{.ID}} {{.Names}}" | grep -i canary | awk '{print $1}' | head -1)
+            fi
+            
+            if [ -z "$MYSQL_CONTAINER" ]; then
+                echo "Looking for any MySQL container except production..."
+                # Ищем все контейнеры mysql-app и исключаем те, что в статусе "healthy" (это продакшен)
+                MYSQL_CONTAINER=$(docker ps --format "{{.ID}} {{.Names}} {{.Status}}" | grep "mysql-app" | grep -v "healthy" | awk '{print $1}' | head -1)
+            fi
+            
+            if [ -z "$MYSQL_CONTAINER" ]; then
+                echo "⚠️ No canary MySQL container found by filters"
+                echo "Listing ALL containers:"
+                docker ps --format "table {{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}"
+                
+                # Берем ЛЮБОЙ контейнер mysql-app кроме явно продакшенного
+                ALL_MYSQL=$(docker ps --filter "ancestor=danil221/mysql-app" --format "{{.ID}} {{.Names}}")
+                echo "All mysql-app containers: $ALL_MYSQL"
+                
+                # Берем первый не-"app_db" контейнер
+                MYSQL_CONTAINER=$(echo "$ALL_MYSQL" | grep -v "app_db" | awk '{print $1}' | head -1)
+            fi
+            
+            if [ -z "$MYSQL_CONTAINER" ]; then
+                echo "❌ Cannot find canary MySQL container"
+                exit 1
+            fi
+            
+            echo "Using MySQL container: $MYSQL_CONTAINER"
+            echo "Container details:"
+            docker ps --filter "id=$MYSQL_CONTAINER" --format "table {{.Names}}\\t{{.Status}}\\t{{.Image}}"
+            
+            echo "2. Test basic MySQL connection..."
+            if docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "SELECT 1" 2>/dev/null; then
+                echo "✅ MySQL is running inside container"
+            else
+                echo "❌ MySQL not responding inside container"
+                echo "Checking logs..."
+                docker logs $MYSQL_CONTAINER --tail 10 2>/dev/null || true
+                exit 1
+            fi
+            
+            echo "3. Check all databases..."
+            docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "SHOW DATABASES;" 2>/dev/null || echo "Cannot show databases"
+            
+            echo "4. Check appdb specifically..."
+            if docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "USE appdb; SHOW TABLES;" 2>/dev/null; then
+                echo "✅ appdb database exists with tables"
+                
+                # Check specific tables
+                USERS_EXISTS=$(docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword appdb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='appdb' AND table_name='users';" 2>/dev/null || echo "0")
+                WORKOUTS_EXISTS=$(docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword appdb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='appdb' AND table_name='workouts';" 2>/dev/null || echo "0")
+                
+                echo "Users table: $USERS_EXISTS"
+                echo "Workouts table: $WORKOUTS_EXISTS"
+                
+                if [ "$USERS_EXISTS" = "1" ] && [ "$WORKOUTS_EXISTS" = "1" ]; then
+                    echo "✅ Both tables created successfully!"
+                else
+                    echo "❌ Tables missing"
+                    exit 1
+                fi
+            else
+                echo "❌ appdb database not found or empty"
+                exit 1
+            fi
+            '''
         }
+    }
+}
+          
+          
+        
         
         stage('Test Canary Web Application') {
             steps {
