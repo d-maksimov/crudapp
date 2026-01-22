@@ -63,32 +63,45 @@ pipeline {
     }
 
     stage('Deploy Canary') {
-      steps {
-        script {
-          sh '''
-            echo "=== Развёртывание Canary (1 реплика) ==="
-            export DOCKER_HOST="tcp://192.168.0.1:2376"
-            
-            # Удаляем старый стек если есть
-            docker stack rm ${CANARY_APP_NAME} 2>/dev/null || true
-            sleep 10
-            
-            # Разворачиваем новый стек
-            docker stack deploy -c docker-compose_canary.yaml ${CANARY_APP_NAME} --with-registry-auth
-            sleep 40
-            
-            # Проверяем сервисы
-            echo "Проверка запущенных сервисов:"
-            docker service ls --filter name=${CANARY_APP_NAME}
-            
-            # Проверяем контейнеры
-            echo "Проверка контейнеров:"
-            docker ps --filter "name=${CANARY_APP_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-          '''
-        }
-      }
+  steps {
+    script {
+      sh '''
+        echo "=== Развёртывание Canary (1 реплика) ==="
+        export DOCKER_HOST="tcp://192.168.0.1:2376"
+        
+        # Удаляем старый стек если есть
+        docker stack rm ${CANARY_APP_NAME} 2>/dev/null || true
+        sleep 5
+        
+        # Разворачиваем новый стек
+        docker stack deploy -c docker-compose_canary.yaml ${CANARY_APP_NAME} --with-registry-auth
+        sleep 10
+        
+        # Проверяем сервисы сразу
+        echo "Проверка запущенных сервисов (через 10 сек):"
+        docker service ls --filter name=${CANARY_APP_NAME}
+        
+        # Ждем еще и проверяем
+        sleep 30
+        
+        echo "Проверка запущенных сервисов (через 40 сек):"
+        docker service ls --filter name=${CANARY_APP_NAME}
+        
+        # Смотрим детальный статус MySQL
+        echo "Детальный статус MySQL сервиса:"
+        docker service ps ${CANARY_APP_NAME}_db --no-trunc || true
+        
+        # Проверяем логи MySQL если контейнер пытался запуститься
+        echo "Логи MySQL сервиса:"
+        docker service logs ${CANARY_APP_NAME}_db --tail 30 2>/dev/null || echo "Не удалось получить логи"
+        
+        # Проверяем контейнеры
+        echo "Проверка всех контейнеров:"
+        docker ps -a --filter "name=${CANARY_APP_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+      '''
     }
-
+  }
+}
     stage('Canary Database Check') {
       steps {
         script {
