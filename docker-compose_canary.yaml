@@ -7,9 +7,14 @@ services:
       MYSQL_ROOT_PASSWORD: rootpassword
       MYSQL_DATABASE: appdb
     ports:
-      - "3307:3306"  # Используем другой порт для canary
+      - "3307:3306"
     networks:
       - canary-network
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.jenkins == true  # ⭐ Запускать на ноде с меткой jenkins
 
   web-server:
     image: danil221/php-app:latest
@@ -24,8 +29,14 @@ services:
       - canary-network
     depends_on:
       - db
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.jenkins == true  # ⭐ Запускать на ноде с меткой jenkins
 
 networks:
   canary-network:
     driver: overlay
+    name: app-canary-network
     attachable: true
