@@ -92,71 +92,146 @@ pipeline {
             }
         }
 
-        stage('Deploy Canary') {
-            steps {
-                script {
-                    sh '''
-                        echo "=== РАЗВЕРТЫВАНИЕ CANARY ==="
-                        export DOCKER_HOST="tcp://192.168.0.1:2376"
-                        
-                        echo "1. Очистка предыдущего canary..."
-                        docker stack rm ${CANARY_APP_NAME} 2>/dev/null || true
-                        sleep 15
-                        
-                        echo "2. Очистка volume'ов MySQL..."
-                        docker volume rm ${CANARY_APP_NAME}_canary_mysql_data 2>/dev/null || true
-                        
-                        echo "3. Используем порт 3307 для canary MySQL..."
-                        CANARY_DB_PORT="3307"
-                        
-                        echo "4. Подготовка docker-compose для canary..."
-                        cp docker-compose_canary.yaml docker-compose_canary_temp.yaml
-                        
-                        # Заменяем переменные в файле
-                        sed -i "s/\\\${BUILD_NUMBER}/${BUILD_NUMBER}/g" docker-compose_canary_temp.yaml
-                        sed -i "s/\\\${DOCKER_HUB_USER}/${DOCKER_HUB_USER}/g" docker-compose_canary_temp.yaml
-                        sed -i "s/3306:3306/${CANARY_DB_PORT}:3306/g" docker-compose_canary_temp.yaml
-                        
-                        # Добавляем constraint для запуска на worker1
-                        echo "4.1 Добавляем constraint для запуска canary MySQL на worker1..."
-                        sed -i '/db:/a\\    deploy:\\n      placement:\\n        constraints:\\n          - node.hostname == worker1' docker-compose_canary_temp.yaml
-                        
-                        echo "5. Развертывание canary стека..."
-                        docker stack deploy -c docker-compose_canary_temp.yaml ${CANARY_APP_NAME} --with-registry-auth
-                        
-                        echo "6. Ожидание запуска canary сервисов..."
-                        TIMEOUT=180
-                        START_TIME=$(date +%s)
-                        
-                        while true; do
-                            CURRENT_TIME=$(date +%s)
-                            ELAPSED=$((CURRENT_TIME - START_TIME))
-                            
-                            if [ $ELAPSED -ge $TIMEOUT ]; then
-                                echo "⚠️  Таймаут ожидания запуска canary..."
-                                break
-                            fi
-                            
-                            DB_STATUS=$(docker service ls --filter name=${CANARY_APP_NAME}_db --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
-                            WEB_STATUS=$(docker service ls --filter name=${CANARY_APP_NAME}_web-server --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
-                            
-                            echo "   DB: ${DB_STATUS}, Web: ${WEB_STATUS} (прошло ${ELAPSED} сек)"
-                            
-                            # Если web запущен, продолжаем
-                            if echo "${WEB_STATUS}" | grep -q "1/1"; then
-                                echo "✅ Web сервер запущен"
-                                break
-                            fi
-                            
-                            sleep 10
-                        done
-                        
-                        echo "✅ Canary развернут"
-                        docker service ls --filter name=${CANARY_APP_NAME}
-                    '''
-                }
-            }
+       stage('Deploy Canary') {
+    steps {
+        script {
+            sh '''
+                echo "=== РАЗВЕРТЫВАНИЕ CANARY ==="
+                export DOCKER_HOST="tcp://192.168.0.1:2376"
+                
+                echo "1. Очистка предыдущего canary..."
+                docker stack rm app-canary 2>/dev/null || true
+                sleep 15
+                
+                echo "2. Очистка volume'ов MySQL..."
+                docker volume rm app-canary_canary_mysql_data 2>/dev/null || true
+                
+                echo "3. Используем порт 3307 для canary MySQL..."
+                CANARY_DB_PORT="3307"
+                
+                echo "4. Подготовка docker-compose для canary..."
+                cp docker-compose_canary.yaml docker-compose_canary_temp.yaml
+                
+                # Заменяем переменные в файле
+                sed -i "s/\\\${BUILD_NUMBER}/${BUILD_NUMBER}/g" docker-compose_canary_temp.yaml
+                sed -i "s/\\\${DOCKER_HUB_USER}/${DOCKER_HUB_USER}/g" docker-compose_canary_temp.yaml
+                sed -i "s/3306:3306/${CANARY_DB_PORT}:3306/g" docker-compose_canary_temp.yaml
+                
+                echo "4.1 Добавляем constraint для запуска canary MySQL на worker1..."
+                
+                # Нужно добавить placement constraints в СУЩЕСТВУЮЩУЮ deploy секцию для db
+                # Находим строку с "deploy:" для сервиса db и добавляем placement после нее
+                
+                # Создаем временный файл с правильной структурой
+                cat > docker-compose_canary_fixed.yaml << 'EOF'
+version: '3.8'
+
+services:
+  db:
+    image: ${DOCKER_HUB_USER}/mysql-app:${BUILD_NUMBER}
+    command: --default-authentication-plugin=mysql_native_password
+    environment:
+      - MYSQL_ROOT_PASSWORD=rootpassword
+      - MYSQL_DATABASE=appdb
+      - MYSQL_USER=user
+      - MYSQL_PASSWORD=userpassword
+    volumes:
+      - canary_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == worker1
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  web-server:
+    image: ${DOCKER_HUB_USER}/php-app:${BUILD_NUMBER}
+    environment:
+      - DB_HOST=db
+      - DB_PORT=${CANARY_DB_PORT}
+      - DB_NAME=appdb
+      - DB_USER=user
+      - DB_PASSWORD=userpassword
+      - APP_ENV=canary
+    ports:
+      - "8081:80"
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+networks:
+  default:
+    driver: overlay
+    attachable: true
+
+volumes:
+  canary_mysql_data:
+    driver: local
+EOF
+                
+                # Заменяем переменные в новом файле
+                sed -i "s/\\\${BUILD_NUMBER}/${BUILD_NUMBER}/g" docker-compose_canary_fixed.yaml
+                sed -i "s/\\\${DOCKER_HUB_USER}/${DOCKER_HUB_USER}/g" docker-compose_canary_fixed.yaml
+                sed -i "s/\\\${CANARY_DB_PORT}/${CANARY_DB_PORT}/g" docker-compose_canary_fixed.yaml
+                
+                echo "Проверяем созданный файл..."
+                echo "=== Начало файла ==="
+                head -40 docker-compose_canary_fixed.yaml
+                echo "=== Конец файла ==="
+                
+                # Используем исправленный файл
+                mv docker-compose_canary_fixed.yaml docker-compose_canary_temp.yaml
+                
+                echo "5. Развертывание canary стека..."
+                docker stack deploy -c docker-compose_canary_temp.yaml app-canary --with-registry-auth
+                
+                echo "6. Ожидание запуска canary сервисов..."
+                TIMEOUT=180
+                START_TIME=$(date +%s)
+                
+                while true; do
+                    CURRENT_TIME=$(date +%s)
+                    ELAPSED=$((CURRENT_TIME - START_TIME))
+                    
+                    if [ $ELAPSED -ge $TIMEOUT ]; then
+                        echo "⚠️  Таймаут ожидания запуска canary..."
+                        break
+                    fi
+                    
+                    DB_STATUS=$(docker service ls --filter name=app-canary_db --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
+                    WEB_STATUS=$(docker service ls --filter name=app-canary_web-server --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
+                    
+                    echo "   DB: ${DB_STATUS}, Web: ${WEB_STATUS} (прошло ${ELAPSED} сек)"
+                    
+                    # Если web запущен, продолжаем
+                    if echo "${WEB_STATUS}" | grep -q "1/1"; then
+                        echo "✅ Web сервер запущен"
+                        break
+                    fi
+                    
+                    sleep 10
+                done
+                
+                echo "✅ Canary развернут"
+                docker service ls --filter name=app-canary
+            '''
         }
+    }
+}
 
         stage('Canary Database Check') {
             steps {
