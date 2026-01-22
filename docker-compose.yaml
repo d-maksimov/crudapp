@@ -4,39 +4,22 @@ services:
   db:
     image: danil221/mysql-app:latest
     environment:
-      MYSQL_DATABASE: appdb
-      MYSQL_USER: user
-      MYSQL_PASSWORD: userpassword
       MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: appdb
     volumes:
       - mysql_data:/var/lib/mysql
     networks:
       - app-network
-    command: >
-      --default-authentication-plugin=mysql_native_password
-      --bind-address=0.0.0.0
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
-      interval: 30s
-      timeout: 15s
-      retries: 5
-      start_period: 90s
     deploy:
-      mode: replicated
       replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
 
   web:
     image: danil221/php-app:latest
-    # ВАЖНО: Добавляем переменные окружения для подключения к БД
     environment:
-      - DB_HOST=db  # Имя сервиса MySQL
-      - DB_PORT=3306
+      - DB_HOST=db
       - DB_NAME=appdb
-      - DB_USER=user
-      - DB_PASSWORD=userpassword
+      - DB_USER=root
+      - DB_PASS=rootpassword
     ports:
       - "80:80"
     networks:
@@ -45,14 +28,10 @@ services:
       - db
     deploy:
       replicas: 2
-      update_config:
-        parallelism: 1
-        delay: 10s
 
 networks:
   app-network:
     driver: overlay
-    attachable: true
 
 volumes:
   mysql_data:

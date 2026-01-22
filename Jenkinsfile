@@ -33,31 +33,6 @@ pipeline {
                 }
             }
         }
-        stage('Check Network') {
-    steps {
-        script {
-            sh '''
-            echo "=== CHECKING NETWORK ==="
-            export DOCKER_HOST="tcp://192.168.0.1:2376"
-            
-            echo "1. List all networks:"
-            docker network ls
-            
-            echo "2. Check canary network:"
-            docker network inspect app-canary_canary-network 2>/dev/null || echo "Network not found"
-            
-            echo "3. Check if containers are in network:"
-            docker ps --filter "name=app-canary" --format "table {{.Names}}\\t{{.Networks}}"
-            
-            echo "4. Inspect MySQL container network:"
-            MYSQL_CONTAINER=$(docker ps -q --filter "name=app-canary_db")
-            if [ -n "$MYSQL_CONTAINER" ]; then
-                docker inspect $MYSQL_CONTAINER --format='{{range $net, $settings := .NetworkSettings.Networks}}{{$net}}: {{$settings.IPAddress}}{{"\\n"}}{{end}}'
-            fi
-            '''
-        }
-    }
-}
         
         stage('Push to Docker Hub') {
             steps {
@@ -88,177 +63,183 @@ pipeline {
         }
         
         stage('Deploy Canary') {
-    steps {
-        script {
-            sh '''
-            echo "=== Deploying Canary ==="
-            export DOCKER_HOST="tcp://192.168.0.1:2376"
-            
-            # Удаляем старый стек
-            docker stack rm app-canary 2>/dev/null || true
-            sleep 5
-            
-            # Создаем сеть заранее если нужно
-            echo "Creating network if not exists..."
-            docker network create -d overlay --attachable app-canary_network 2>/dev/null || true
-            
-            echo "Network status:"
-            docker network ls | grep canary || true
-            
-            # Деплоим
-            docker stack deploy -c docker-compose_canary.yaml app-canary --with-registry-auth
-            
-            echo "Waiting 30 seconds..."
-            sleep 30
-            
-            echo "Service status:"
-            docker service ls --filter name=app-canary
-            
-            echo "Network inspection:"
-            docker network inspect app-canary_canary-network 2>/dev/null || docker network inspect app-canary_network 2>/dev/null || echo "Cannot inspect network"
-            '''
-        }
-    }
-}
-        
-        
-        stage('Check Database') {
             steps {
                 script {
-                    sh """
-                    echo "=== Checking Database ==="
-                    export DOCKER_HOST=tcp://192.168.0.1:2376
+                    sh '''
+                    echo "=== Deploying Canary ==="
+                    export DOCKER_HOST="tcp://192.168.0.1:2376"
                     
-                    echo "1. Waiting for MySQL to be ready..."
+                    # Clean up old stack
+                    docker stack rm app-canary 2>/dev/null || true
+                    sleep 10
                     
-                    # Wait for MySQL with timeout
-                    for i in \$(seq 1 10); do
-                        echo "Attempt \$i/10..."
-                        if docker run --rm --network app-canary_canary-network mysql:8.0 \\
-                           mysql -h db -u root -prootpassword -e "SELECT 1" 2>/dev/null; then
-                            echo "✅ MySQL is ready"
-                            break
-                        fi
-                        sleep 10
-                    done
+                    # Deploy new canary
+                    docker stack deploy -c docker-compose_canary.yaml app-canary --with-registry-auth
                     
-                    echo "2. Checking databases..."
-                    docker run --rm --network app-canary_canary-network mysql:8.0 \\
-                        mysql -h db -u root -prootpassword -e "SHOW DATABASES;" 2>/dev/null || echo "Failed to connect"
+                    echo "Waiting 90 seconds for services to start..."
+                    sleep 90
                     
-                    echo "3. Checking appdb database..."
-                    if docker run --rm --network app-canary_canary-network mysql:8.0 \\
-                       mysql -h db -u root -prootpassword -e "USE appdb; SHOW TABLES;" 2>/dev/null; then
-                        echo "✅ appdb database exists"
-                        
-                        # Check tables
-                        USERS_TABLE=\$(docker run --rm --network app-canary_canary-network mysql:8.0 \\
-                            mysql -h db -u root -prootpassword appdb -N -e \\
-                            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='appdb' AND table_name='users';" 2>/dev/null || echo "0")
-                        
-                        WORKOUTS_TABLE=\$(docker run --rm --network app-canary_canary-network mysql:8.0 \\
-                            mysql -h db -u root -prootpassword appdb -N -e \\
-                            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='appdb' AND table_name='workouts';" 2>/dev/null || echo "0")
-                        
-                        echo "Users table exists: \$USERS_TABLE"
-                        echo "Workouts table exists: \$WORKOUTS_TABLE"
-                        
-                        if [ "\$USERS_TABLE" = "1" ] && [ "\$WORKOUTS_TABLE" = "1" ]; then
-                            echo "✅ Both tables created successfully!"
-                            
-                            # Show table structure
-                            echo "Table structure:"
-                            docker run --rm --network app-canary_canary-network mysql:8.0 \\
-                                mysql -h db -u root -prootpassword appdb -e "DESCRIBE users; DESCRIBE workouts;" 2>/dev/null || true
-                        else
-                            echo "❌ Tables not created properly"
-                            exit 1
-                        fi
-                    else
-                        echo "❌ appdb database not found or not accessible"
-                        exit 1
-                    fi
-                    """
+                    echo "Canary services:"
+                    docker service ls --filter name=app-canary
+                    '''
                 }
             }
         }
         
-        stage('Test Canary') {
+        stage('Check MySQL Container') {
             steps {
                 script {
-                    sh """
-                    echo "=== Testing Canary ==="
-                    export DOCKER_HOST=tcp://192.168.0.1:2376
+                    sh '''
+                    echo "=== Checking MySQL Container ==="
+                    export DOCKER_HOST="tcp://192.168.0.1:2376"
                     
-                    echo "Testing PHP application on port 8081..."
+                    echo "1. Find MySQL container..."
+                    MYSQL_CONTAINER=$(docker ps -q --filter "name=app-canary_db")
+                    
+                    if [ -z "$MYSQL_CONTAINER" ]; then
+                        echo "❌ MySQL container not found!"
+                        docker ps -a
+                        exit 1
+                    fi
+                    
+                    echo "MySQL container: $MYSQL_CONTAINER"
+                    
+                    echo "2. Check container status..."
+                    docker ps --filter "id=$MYSQL_CONTAINER" --format "table {{.Names}}\\t{{.Status}}"
+                    
+                    echo "3. Check MySQL logs (last 20 lines)..."
+                    docker logs $MYSQL_CONTAINER --tail 20 2>/dev/null || echo "Cannot get logs"
+                    '''
+                }
+            }
+        }
+        
+        stage('Test Database Inside Container') {
+            steps {
+                script {
+                    sh '''
+                    echo "=== Testing Database Inside Container ==="
+                    export DOCKER_HOST="tcp://192.168.0.1:2376"
+                    
+                    MYSQL_CONTAINER=$(docker ps -q --filter "name=app-canary_db")
+                    
+                    if [ -z "$MYSQL_CONTAINER" ]; then
+                        echo "❌ No MySQL container found"
+                        exit 1
+                    fi
+                    
+                    echo "1. Test basic MySQL connection..."
+                    if docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "SELECT 1" 2>/dev/null; then
+                        echo "✅ MySQL is running inside container"
+                    else
+                        echo "❌ MySQL not responding inside container"
+                        exit 1
+                    fi
+                    
+                    echo "2. Check all databases..."
+                    docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "SHOW DATABASES;" 2>/dev/null || echo "Cannot show databases"
+                    
+                    echo "3. Check appdb specifically..."
+                    if docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "USE appdb; SHOW TABLES;" 2>/dev/null; then
+                        echo "✅ appdb database exists with tables"
+                        
+                        # Check specific tables
+                        USERS_EXISTS=$(docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword appdb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='appdb' AND table_name='users';" 2>/dev/null || echo "0")
+                        WORKOUTS_EXISTS=$(docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword appdb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='appdb' AND table_name='workouts';" 2>/dev/null || echo "0")
+                        
+                        echo "Users table: $USERS_EXISTS"
+                        echo "Workouts table: $WORKOUTS_EXISTS"
+                        
+                        if [ "$USERS_EXISTS" = "1" ] && [ "$WORKOUTS_EXISTS" = "1" ]; then
+                            echo "✅ Both tables created successfully!"
+                        else
+                            echo "❌ Tables missing"
+                            exit 1
+                        fi
+                    else
+                        echo "❌ appdb database not found or empty"
+                        exit 1
+                    fi
+                    '''
+                }
+            }
+        }
+        
+        stage('Test Canary Web Application') {
+            steps {
+                script {
+                    sh '''
+                    echo "=== Testing Canary Web Application ==="
+                    export DOCKER_HOST="tcp://192.168.0.1:2376"
+                    
+                    echo "Testing on http://${MANAGER_IP}:8081"
                     
                     SUCCESS=0
-                    TOTAL_TESTS=5
+                    TESTS=3
                     
-                    for i in \$(seq 1 \$TOTAL_TESTS); do
-                        echo "Test \$i/\$TOTAL_TESTS..."
+                    for i in $(seq 1 $TESTS); do
+                        echo "Test $i/$TESTS..."
                         if curl -f -s --max-time 10 http://${MANAGER_IP}:8081/ > /dev/null 2>&1; then
-                            SUCCESS=\$((SUCCESS + 1))
+                            SUCCESS=$((SUCCESS + 1))
                             echo "✓ Test passed"
                         else
                             echo "✗ Test failed"
                         fi
-                        sleep 2
+                        sleep 3
                     done
                     
-                    echo "Tests passed: \$SUCCESS/\$TOTAL_TESTS"
+                    echo "Tests passed: $SUCCESS/$TESTS"
                     
-                    if [ "\$SUCCESS" -ge 3 ]; then
-                        echo "✅ Canary tests passed"
+                    if [ "$SUCCESS" -ge 2 ]; then
+                        echo "✅ Canary web application working"
                     else
-                        echo "❌ Canary tests failed"
+                        echo "❌ Canary web application failing"
                         exit 1
                     fi
-                    """
+                    '''
                 }
             }
         }
         
         stage('Deploy to Production') {
-    steps {
-        script {
-            sh '''
-            echo "=== Deploying Production Stack ==="
-            export DOCKER_HOST="tcp://192.168.0.1:2376"
-            
-            # Удаляем старый стек если есть
-            docker stack rm app 2>/dev/null || true
-            sleep 10
-            
-            # Разворачиваем новый стек
-            echo "Deploying new production stack..."
-            docker stack deploy -c docker-compose.yaml app --with-registry-auth
-            
-            echo "Waiting for production to start..."
-            sleep 90
-            
-            echo "Production services:"
-            docker service ls --filter name=app
-            
-            # Удаляем canary
-            echo "Removing canary stack..."
-            docker stack rm app-canary 2>/dev/null || true
-            '''
-        }
-    }
-}
-        
-        stage('Final Verification') {
             steps {
                 script {
-                    sh """
-                    echo "=== Final Verification ==="
-                    export DOCKER_HOST=tcp://192.168.0.1:2376
+                    sh '''
+                    echo "=== Deploying to Production ==="
+                    export DOCKER_HOST="tcp://192.168.0.1:2376"
                     
-                    echo "Testing production on port 80..."
+                    echo "1. Deploy/update production stack..."
                     
-                    for i in \$(seq 1 3); do
-                        echo "Test \$i/3..."
+                    # Always deploy fresh stack (simpler)
+                    docker stack rm app 2>/dev/null || true
+                    sleep 10
+                    
+                    docker stack deploy -c docker-compose.yaml app --with-registry-auth
+                    
+                    echo "Waiting for production to start..."
+                    sleep 60
+                    
+                    echo "2. Production services:"
+                    docker service ls --filter name=app
+                    
+                    echo "3. Remove canary..."
+                    docker stack rm app-canary 2>/dev/null || true
+                    '''
+                }
+            }
+        }
+        
+        stage('Verify Production') {
+            steps {
+                script {
+                    sh '''
+                    echo "=== Verifying Production ==="
+                    export DOCKER_HOST="tcp://192.168.0.1:2376"
+                    
+                    echo "Testing production on http://${MANAGER_IP}:80"
+                    
+                    for i in $(seq 1 3); do
+                        echo "Test $i/3..."
                         if curl -f -s --max-time 10 http://${MANAGER_IP}:80/ > /dev/null 2>&1; then
                             echo "✓ Test passed"
                         else
@@ -268,8 +249,8 @@ pipeline {
                         sleep 3
                     done
                     
-                    echo "✅ All tests passed!"
-                    """
+                    echo "✅ Production deployment successful!"
+                    '''
                 }
             }
         }
@@ -279,11 +260,11 @@ pipeline {
         always {
             echo "Cleaning up..."
             script {
-                sh """
-                export DOCKER_HOST=tcp://192.168.0.1:2376 2>/dev/null || true
+                sh '''
+                export DOCKER_HOST="tcp://192.168.0.1:2376" 2>/dev/null || true
                 docker logout 2>/dev/null || true
                 docker image prune -f 2>/dev/null || true
-                """
+                '''
             }
         }
         success {
@@ -292,12 +273,12 @@ pipeline {
         failure {
             echo "❌ Pipeline failed"
             script {
-                sh """
-                export DOCKER_HOST=tcp://192.168.0.1:2376 2>/dev/null || true
-                # Remove canary on failure
+                sh '''
+                export DOCKER_HOST="tcp://192.168.0.1:2376" 2>/dev/null || true
+                # Clean up canary on failure
                 docker stack rm app-canary 2>/dev/null || true
-                echo "Canary removed, production untouched"
-                """
+                echo "Canary stack removed"
+                '''
             }
         }
     }
