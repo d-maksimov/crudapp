@@ -265,7 +265,7 @@ pipeline {
 }
         
         // Этап 6: СТРОГАЯ проверка базы данных Canary
-        stage('Strict Check Canary Database') {
+       stage('Strict Check Canary Database') {
     steps {
         script {
             sh '''
@@ -299,13 +299,131 @@ pipeline {
                     if docker run --rm --network app-canary_default mysql:8.0 \\
                        mysql -h db -u root -prootpassword -e "SHOW DATABASES;" 2>/dev/null | grep -q appdb; then
                         echo "   ✅ База данных 'appdb' существует"
-                        # ... остальной код проверки ...
+                        
+                        echo "4. СТРОГАЯ проверка наличия таблиц 'users' и 'workouts'..."
+                        
+                        # Проверяем таблицу users
+                        USERS_TABLE_EXISTS=$(docker run --rm --network app-canary_default mysql:8.0 \\
+                            mysql -h db -u root -prootpassword appdb -N -e \\
+                            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'appdb' AND table_name = 'users';" 2>/dev/null || echo "0")
+                        
+                        # Проверяем таблицу workouts
+                        WORKOUTS_TABLE_EXISTS=$(docker run --rm --network app-canary_default mysql:8.0 \\
+                            mysql -h db -u root -prootpassword appdb -N -e \\
+                            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'appdb' AND table_name = 'workouts';" 2>/dev/null || echo "0")
+                        
+                        echo "   Результат проверки:"
+                        echo "   • Таблица 'users': ${USERS_TABLE_EXISTS} (1 = существует, 0 = нет)"
+                        echo "   • Таблица 'workouts': ${WORKOUTS_TABLE_EXISTS} (1 = существует, 0 = нет)"
+                        
+                        # КРИТИЧЕСКАЯ ПРОВЕРКА: обе таблицы должны существовать
+                        if [ "${USERS_TABLE_EXISTS}" = "1" ] && [ "${WORKOUTS_TABLE_EXISTS}" = "1" ]; then
+                            echo "   ✅ ОБЕ таблицы (users и workouts) существуют!"
+                            
+                            # Дополнительная проверка структуры
+                            echo "5. Проверка структуры таблиц..."
+                            
+                            # Проверяем количество столбцов в таблице users (минимум должна быть структура)
+                            USERS_COLUMNS=$(docker run --rm --network app-canary_default mysql:8.0 \\
+                                mysql -h db -u root -prootpassword appdb -N -e \\
+                                "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'appdb' AND table_name = 'users';" 2>/dev/null || echo "0")
+                            
+                            # Проверяем количество столбцов в таблице workouts
+                            WORKOUTS_COLUMNS=$(docker run --rm --network app-canary_default mysql:8.0 \\
+                                mysql -h db -u root -prootpassword appdb -N -e \\
+                                "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'appdb' AND table_name = 'workouts';" 2>/dev/null || echo "0")
+                            
+                            echo "   • Столбцов в 'users': ${USERS_COLUMNS}"
+                            echo "   • Столбцов в 'workouts': ${WORKOUTS_COLUMNS}"
+                            
+                            if [ "${USERS_COLUMNS}" -gt "0" ] && [ "${WORKOUTS_COLUMNS}" -gt "0" ]; then
+                                echo "   ✅ Структура таблиц корректна"
+                            else
+                                echo "   ⚠️  Структура таблиц может быть неполной"
+                            fi
+                            
+                            echo "✅ СТРОГАЯ проверка БД пройдена успешно"
+                            
+                        elif [ "${USERS_TABLE_EXISTS}" = "0" ] && [ "${WORKOUTS_TABLE_EXISTS}" = "0" ]; then
+                            echo "❌ КРИТИЧЕСКАЯ ОШИБКА: Обе таблицы не созданы!"
+                            echo "   init.sql не выполнился или выполнился с ошибкой"
+                            
+                            echo "6. Попытка восстановления..."
+                            
+                            # Проверяем существование init.sql
+                            if [ -f "init.sql" ]; then
+                                echo "   Выполняем init.sql принудительно..."
+                                
+                                # Копируем init.sql во временный контейнер и выполняем
+                                docker run --rm --network app-canary_default -v $(pwd)/init.sql:/tmp/init.sql mysql:8.0 \\
+                                    mysql -h db -u root -prootpassword appdb < /tmp/init.sql 2>&1 | tail -5
+                                
+                                echo "   Ждем 10 секунд..."
+                                sleep 10
+                                
+                                # Повторная проверка
+                                USERS_TABLE_EXISTS2=$(docker run --rm --network app-canary_default mysql:8.0 \\
+                                    mysql -h db -u root -prootpassword appdb -N -e \\
+                                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'appdb' AND table_name = 'users';" 2>/dev/null || echo "0")
+                                
+                                WORKOUTS_TABLE_EXISTS2=$(docker run --rm --network app-canary_default mysql:8.0 \\
+                                    mysql -h db -u root -prootpassword appdb -N -e \\
+                                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'appdb' AND table_name = 'workouts';" 2>/dev/null || echo "0")
+                                
+                                if [ "${USERS_TABLE_EXISTS2}" = "1" ] && [ "${WORKOUTS_TABLE_EXISTS2}" = "1" ]; then
+                                    echo "   ✅ Таблицы созданы после восстановления"
+                                    echo "✅ Проверка БД пройдена после восстановления"
+                                else
+                                    echo "❌ Не удалось создать таблицы даже принудительно"
+                                    echo "   Проверьте содержимое init.sql"
+                                    echo "   Последние логи MySQL:"
+                                    docker service logs app-canary_db --tail 20 2>/dev/null || true
+                                    exit 1
+                                fi
+                            else
+                                echo "❌ Файл init.sql не найден!"
+                                exit 1
+                            fi
+                            
+                        elif [ "${USERS_TABLE_EXISTS}" = "1" ] && [ "${WORKOUTS_TABLE_EXISTS}" = "0" ]; then
+                            echo "❌ КРИТИЧЕСКАЯ ОШИБКА: Таблица 'users' существует, но 'workouts' - нет!"
+                            echo "   База данных в некорректном состоянии"
+                            echo "   Возможно init.sql выполнился частично"
+                            exit 1
+                            
+                        elif [ "${USERS_TABLE_EXISTS}" = "0" ] && [ "${WORKOUTS_TABLE_EXISTS}" = "1" ]; then
+                            echo "❌ КРИТИЧЕСКАЯ ОШИБКА: Таблица 'workouts' существует, но 'users' - нет!"
+                            echo "   База данных в некорректном состоянии"
+                            echo "   Возможно init.sql выполнился частично"
+                            exit 1
+                        fi
+                        
                     else
                         echo "❌ База данных 'appdb' не найдена"
                         echo "   Логи MySQL:"
                         docker service logs app-canary_db --tail 30 2>/dev/null || true
                         exit 1
                     fi
+                    
+                    echo "7. Финальная проверка данных (опционально)..."
+                    
+                    # Проверяем, есть ли хотя бы тестовые данные
+                    USERS_COUNT=$(docker run --rm --network app-canary_default mysql:8.0 \\
+                        mysql -h db -u root -prootpassword appdb -N -e "SELECT COUNT(*) FROM users;" 2>/dev/null || echo "0")
+                    
+                    WORKOUTS_COUNT=$(docker run --rm --network app-canary_default mysql:8.0 \\
+                        mysql -h db -u root -prootpassword appdb -N -e "SELECT COUNT(*) FROM workouts;" 2>/dev/null || echo "0")
+                    
+                    echo "   • Записей в 'users': ${USERS_COUNT}"
+                    echo "   • Записей в 'workouts': ${WORKOUTS_COUNT}"
+                    
+                    if [ "${USERS_COUNT}" -gt "0" ] || [ "${WORKOUTS_COUNT}" -gt "0" ]; then
+                        echo "   ✅ В таблицах есть данные"
+                    else
+                        echo "   ⚠️  Таблицы пустые (это нормально при первом запуске)"
+                    fi
+                    
+                    echo "✅ СТРОГАЯ проверка базы данных завершена успешно"
                 fi
             '''
         }
