@@ -1,5 +1,6 @@
 pipeline {
   agent { label 'docker-agent' }
+
   environment {
     APP_NAME = 'app'
     CANARY_APP_NAME = 'app-canary'
@@ -68,9 +69,21 @@ pipeline {
             echo "=== Развёртывание Canary (1 реплика) ==="
             export DOCKER_HOST="tcp://192.168.0.1:2376"
             
+            # Удаляем старый стек если есть
+            docker stack rm ${CANARY_APP_NAME} 2>/dev/null || true
+            sleep 10
+            
+            # Разворачиваем новый стек
             docker stack deploy -c docker-compose_canary.yaml ${CANARY_APP_NAME} --with-registry-auth
             sleep 40
+            
+            # Проверяем сервисы
+            echo "Проверка запущенных сервисов:"
             docker service ls --filter name=${CANARY_APP_NAME}
+            
+            # Проверяем контейнеры
+            echo "Проверка контейнеров:"
+            docker ps --filter "name=${CANARY_APP_NAME}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
           '''
         }
       }
@@ -84,30 +97,68 @@ pipeline {
             export DOCKER_HOST="tcp://192.168.0.1:2376"
             
             echo "1. Ожидание инициализации MySQL..."
-            sleep 30
             
-            echo "2. Проверка таблиц users и workouts..."
+            # Ждем с проверкой готовности MySQL
+            for i in {1..12}; do
+              echo "Проверка MySQL... ($((i*5)) сек)"
+              if docker run --rm --network ${CANARY_APP_NAME}_canary-network mysql:8.0 mysql -h db -u root -prootpassword -e "SELECT 1" 2>/dev/null; then
+                echo "✅ MySQL готов"
+                break
+              fi
+              sleep 5
+            done
             
-            # Проверяем таблицу users
-            USERS_EXISTS=$(docker run --rm --network ${CANARY_APP_NAME}_default mysql:8.0 \\
-              mysql -h db -u root -prootpassword appdb -N -e \\
-              "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'appdb' AND table_name = 'users';" 2>/dev/null || echo "0")
+            echo "2. Проверка базы данных appdb..."
             
-            # Проверяем таблицу workouts
-            WORKOUTS_EXISTS=$(docker run --rm --network ${CANARY_APP_NAME}_default mysql:8.0 \\
-              mysql -h db -u root -prootpassword appdb -N -e \\
-              "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'appdb' AND table_name = 'workouts';" 2>/dev/null || echo "0")
+            # Сначала проверяем существует ли база
+            DB_EXISTS=$(docker run --rm --network ${CANARY_APP_NAME}_canary-network mysql:8.0 mysql -h db -u root -prootpassword -N -e "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'appdb';" 2>/dev/null || echo "0")
+            echo "База данных appdb существует: $DB_EXISTS"
             
-            echo "   Результат проверки:"
-            echo "   • Таблица 'users': ${USERS_EXISTS} (1 = существует, 0 = нет)"
-            echo "   • Таблица 'workouts': ${WORKOUTS_EXISTS} (1 = существует, 0 = нет)"
-            
-            # КРИТИЧЕСКАЯ ПРОВЕРКА
-            if [ "${USERS_EXISTS}" = "1" ] && [ "${WORKOUTS_EXISTS}" = "1" ]; then
-              echo "✅ ОБЕ таблицы существуют!"
+            if [ "$DB_EXISTS" = "1" ]; then
+              # Проверяем таблицы
+              USERS_EXISTS=$(docker run --rm --network ${CANARY_APP_NAME}_canary-network mysql:8.0 mysql -h db -u root -prootpassword appdb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'appdb' AND table_name = 'users';" 2>/dev/null || echo "0")
+              WORKOUTS_EXISTS=$(docker run --rm --network ${CANARY_APP_NAME}_canary-network mysql:8.0 mysql -h db -u root -prootpassword appdb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'appdb' AND table_name = 'workouts';" 2>/dev/null || echo "0")
+              
+              echo "   Результат проверки:"
+              echo "   • Таблица 'users': ${USERS_EXISTS} (1 = существует, 0 = нет)"
+              echo "   • Таблица 'workouts': ${WORKOUTS_EXISTS} (1 = существует, 0 = нет)"
+              
+              # КРИТИЧЕСКАЯ ПРОВЕРКА
+              if [ "${USERS_EXISTS}" = "1" ] && [ "${WORKOUTS_EXISTS}" = "1" ]; then
+                echo "✅ ОБЕ таблицы существуют!"
+                
+                # Дополнительно показываем структуру таблиц
+                echo "Структура таблиц:"
+                docker run --rm --network ${CANARY_APP_NAME}_canary-network mysql:8.0 mysql -h db -u root -prootpassword appdb -e "SHOW TABLES; DESCRIBE users; DESCRIBE workouts;" 2>/dev/null || true
+                
+              else
+                echo "❌ КРИТИЧЕСКАЯ ОШИБКА: Не все таблицы созданы!"
+                
+                # Диагностика
+                echo "=== ДИАГНОСТИКА ==="
+                echo "1. Логи MySQL:"
+                docker service logs ${CANARY_APP_NAME}_db --tail 20 2>/dev/null || true
+                
+                echo "2. Проверка init.sql:"
+                MYSQL_CONTAINER=$(docker ps -q --filter "name=${CANARY_APP_NAME}_db")
+                if [ -n "$MYSQL_CONTAINER" ]; then
+                  docker exec $MYSQL_CONTAINER ls -la /docker-entrypoint-initdb.d/ 2>/dev/null || true
+                  docker exec $MYSQL_CONTAINER cat /docker-entrypoint-initdb.d/init.sql 2>/dev/null | head -20 || true
+                fi
+                
+                exit 1
+              fi
             else
-              echo "❌ КРИТИЧЕСКАЯ ОШИБКА: Не все таблицы созданы!"
-              echo "   Проверьте содержимое init.sql"
+              echo "❌ База данных appdb не существует!"
+              
+              # Проверяем какие базы есть
+              echo "Доступные базы данных:"
+              docker run --rm --network ${CANARY_APP_NAME}_canary-network mysql:8.0 mysql -h db -u root -prootpassword -e "SHOW DATABASES;" 2>/dev/null || true
+              
+              # Проверяем логи MySQL
+              echo "Логи MySQL контейнера:"
+              docker service logs ${CANARY_APP_NAME}_db --tail 30 2>/dev/null || true
+              
               exit 1
             fi
           '''
@@ -126,7 +177,7 @@ pipeline {
             TESTS=10
             for i in $(seq 1 $TESTS); do
               echo "Тест $i/$TESTS..."
-              if curl -f -s --max-time 15 http://${MANAGER_IP}:8081/ > /tmp/canary_$i.html; then
+              if curl -f -s --max-time 15 http://${MANAGER_IP}:8081/ > /tmp/canary_$i.html 2>/dev/null; then
                 if ! grep -iq "error\\|fatal\\|exception\\|failed" /tmp/canary_$i.html; then
                   SUCCESS=$((SUCCESS + 1))
                   echo "✓ Тест $i пройден"
@@ -175,7 +226,7 @@ pipeline {
               MONITOR_SUCCESS=0
               MONITOR_TESTS=10
               for j in $(seq 1 $MONITOR_TESTS); do
-                if curl -f -s --max-time 15 http://${MANAGER_IP}:80/ > /tmp/monitor_$j.html; then
+                if curl -f -s --max-time 15 http://${MANAGER_IP}:80/ > /tmp/monitor_$j.html 2>/dev/null; then
                   if ! grep -iq "error\\|fatal" /tmp/monitor_$j.html; then
                     MONITOR_SUCCESS=$((MONITOR_SUCCESS + 1))
                   fi
