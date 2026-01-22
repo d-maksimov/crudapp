@@ -86,33 +86,55 @@ pipeline {
             }
         }
         
-        stage('Check MySQL Container') {
-            steps {
-                script {
-                    sh '''
-                    echo "=== Checking MySQL Container ==="
-                    export DOCKER_HOST="tcp://192.168.0.1:2376"
-                    
-                    echo "1. Find MySQL container..."
-                    MYSQL_CONTAINER=$(docker ps -q --filter "name=app-canary_db")
-                    
-                    if [ -z "$MYSQL_CONTAINER" ]; then
-                        echo "❌ MySQL container not found!"
-                        docker ps -a
-                        exit 1
-                    fi
-                    
-                    echo "MySQL container: $MYSQL_CONTAINER"
-                    
-                    echo "2. Check container status..."
-                    docker ps --filter "id=$MYSQL_CONTAINER" --format "table {{.Names}}\\t{{.Status}}"
-                    
-                    echo "3. Check MySQL logs (last 20 lines)..."
-                    docker logs $MYSQL_CONTAINER --tail 20 2>/dev/null || echo "Cannot get logs"
-                    '''
-                }
-            }
+       stage('Check MySQL Container') {
+    steps {
+        script {
+            sh '''
+            echo "=== Checking MySQL Container ==="
+            export DOCKER_HOST="tcp://192.168.0.1:2376"
+            
+            echo "1. Find MySQL container (Swarm naming)..."
+            
+            # В Swarm контейнеры именуются как <service_name>.<replica_number>.<random_id>
+            # Попробуем разные варианты поиска
+            MYSQL_CONTAINER=$(docker ps -q --filter "name=app-canary_db" --filter "name=.*db.*")
+            
+            if [ -z "$MYSQL_CONTAINER" ]; then
+                echo "Trying alternative search..."
+                # Ищем все контейнеры и фильтруем по названию образа
+                MYSQL_CONTAINER=$(docker ps --format "{{.ID}} {{.Image}}" | grep "mysql-app" | awk '{print $1}' | head -1)
+            fi
+            
+            if [ -z "$MYSQL_CONTAINER" ]; then
+                echo "Trying service tasks..."
+                # Получаем задачи сервиса
+                SERVICE_TASK=$(docker service ps app-canary_db --format "{{.Name}}" --no-trunc 2>/dev/null | head -1)
+                if [ -n "$SERVICE_TASK" ]; then
+                    MYSQL_CONTAINER=$(docker ps --filter "name=$SERVICE_TASK" --format "{{.ID}}" | head -1)
+                fi
+            fi
+            
+            if [ -z "$MYSQL_CONTAINER" ]; then
+                echo "❌ MySQL container not found with filters!"
+                echo "Listing ALL containers to debug..."
+                docker ps --format "table {{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}"
+                echo ""
+                echo "Trying to find by image..."
+                docker ps --filter "ancestor=danil221/mysql-app" --format "table {{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}"
+                exit 1
+            fi
+            
+            echo "MySQL container found: $MYSQL_CONTAINER"
+            
+            echo "2. Check container status..."
+            docker ps --filter "id=$MYSQL_CONTAINER" --format "table {{.Names}}\\t{{.Status}}\\t{{.Image}}"
+            
+            echo "3. Check MySQL logs (last 20 lines)..."
+            docker logs $MYSQL_CONTAINER --tail 20 2>/dev/null || echo "Cannot get logs"
+            '''
         }
+    }
+}
         
         stage('Test Database Inside Container') {
             steps {
