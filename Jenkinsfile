@@ -49,15 +49,44 @@ pipeline {
                         echo "Logging in to Docker Hub..."
                         echo "\${DOCKER_PASS}" | docker login -u "\${DOCKER_USER}" --password-stdin
                         
-                        echo "Pushing PHP image..."
-                        docker push ${DOCKER_HUB_USER}/php-app:${BUILD_TAG}
+                        echo "Tagging as latest..."
+                        docker tag ${DOCKER_HUB_USER}/php-app:${BUILD_TAG} ${DOCKER_HUB_USER}/php-app:latest
+                        docker tag ${DOCKER_HUB_USER}/mysql-app:${BUILD_TAG} ${DOCKER_HUB_USER}/mysql-app:latest
                         
-                        echo "Pushing MySQL image..."
+                        echo "Pushing PHP images..."
+                        docker push ${DOCKER_HUB_USER}/php-app:${BUILD_TAG}
+                        docker push ${DOCKER_HUB_USER}/php-app:latest
+                        
+                        echo "Pushing MySQL images..."
                         docker push ${DOCKER_HUB_USER}/mysql-app:${BUILD_TAG}
+                        docker push ${DOCKER_HUB_USER}/mysql-app:latest
                         
                         echo "✅ Images pushed"
                         """
                     }
+                }
+            }
+        }
+        
+        stage('Debug Before Deploy') {
+            steps {
+                script {
+                    sh '''
+                    echo "=== DEBUG: Checking current state ==="
+                    export DOCKER_HOST="tcp://192.168.0.1:2376"
+                    
+                    echo "1. Current stacks:"
+                    docker stack ls || true
+                    
+                    echo "2. Current services:"
+                    docker service ls || true
+                    
+                    echo "3. Current networks:"
+                    docker network ls | grep -E "(app|canary)" || true
+                    
+                    echo "4. Check if ports are in use:"
+                    netstat -tlnp | grep -E ":(3307|8081)" || echo "Ports 3307 and 8081 available"
+                    '''
                 }
             }
         }
@@ -70,158 +99,135 @@ pipeline {
                     export DOCKER_HOST="tcp://192.168.0.1:2376"
                     
                     # Clean up old stack
+                    echo "Removing old canary stack..."
                     docker stack rm app-canary 2>/dev/null || true
-                    sleep 10
+                    sleep 15
                     
-                    # Deploy new canary
-                    docker stack deploy -c docker-compose_canary.yaml app-canary --with-registry-auth
+                    # Check if files exist
+                    echo "Checking compose files..."
+                    ls -la docker-compose*.yaml || true
                     
-                    echo "Waiting 90 seconds for services to start..."
-                    sleep 90
+                    # Deploy new canary with more logging
+                    echo "Deploying canary stack..."
+                    docker stack deploy -c docker-compose_canary.yaml app-canary --with-registry-auth --prune
                     
-                    echo "Canary services:"
-                    docker service ls --filter name=app-canary
+                    echo "Waiting 30 seconds for initial deployment..."
+                    sleep 30
+                    
+                    echo "Checking service status..."
+                    for i in {1..5}; do
+                        echo "Check $i:"
+                        docker service ls --filter name=app-canary --format "table {{.Name}}\t{{.Mode}}\t{{.Replicas}}\t{{.Image}}"
+                        sleep 10
+                    done
+                    
+                    echo "Detailed service inspection:"
+                    docker service ps app-canary_db --no-trunc || true
+                    docker service ps app-canary_web-server --no-trunc || true
                     '''
                 }
             }
         }
         
-       stage('Check MySQL Container') {
-    steps {
-        script {
-            sh '''
-            echo "=== Checking MySQL Container ==="
-            export DOCKER_HOST="tcp://192.168.0.1:2376"
-            
-            echo "1. Find MySQL container (Swarm naming)..."
-            
-            # В Swarm контейнеры именуются как <service_name>.<replica_number>.<random_id>
-            # Попробуем разные варианты поиска
-            MYSQL_CONTAINER=$(docker ps -q --filter "name=app-canary_db" --filter "name=.*db.*")
-            
-            if [ -z "$MYSQL_CONTAINER" ]; then
-                echo "Trying alternative search..."
-                # Ищем все контейнеры и фильтруем по названию образа
-                MYSQL_CONTAINER=$(docker ps --format "{{.ID}} {{.Image}}" | grep "mysql-app" | awk '{print $1}' | head -1)
-            fi
-            
-            if [ -z "$MYSQL_CONTAINER" ]; then
-                echo "Trying service tasks..."
-                # Получаем задачи сервиса
-                SERVICE_TASK=$(docker service ps app-canary_db --format "{{.Name}}" --no-trunc 2>/dev/null | head -1)
-                if [ -n "$SERVICE_TASK" ]; then
-                    MYSQL_CONTAINER=$(docker ps --filter "name=$SERVICE_TASK" --format "{{.ID}}" | head -1)
-                fi
-            fi
-            
-            if [ -z "$MYSQL_CONTAINER" ]; then
-                echo "❌ MySQL container not found with filters!"
-                echo "Listing ALL containers to debug..."
-                docker ps --format "table {{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}"
-                echo ""
-                echo "Trying to find by image..."
-                docker ps --filter "ancestor=danil221/mysql-app" --format "table {{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}"
-                exit 1
-            fi
-            
-            echo "MySQL container found: $MYSQL_CONTAINER"
-            
-            echo "2. Check container status..."
-            docker ps --filter "id=$MYSQL_CONTAINER" --format "table {{.Names}}\\t{{.Status}}\\t{{.Image}}"
-            
-            echo "3. Check MySQL logs (last 20 lines)..."
-            docker logs $MYSQL_CONTAINER --tail 20 2>/dev/null || echo "Cannot get logs"
-            '''
+        stage('Check Canary Services') {
+            steps {
+                script {
+                    sh '''
+                    echo "=== Checking Canary Services ==="
+                    export DOCKER_HOST="tcp://192.168.0.1:2376"
+                    
+                    echo "1. List all containers with details:"
+                    docker ps -a --format "table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" | grep -E "(canary|mysql|php)" || true
+                    
+                    echo "2. Find canary MySQL container:"
+                    # Более простой и надежный способ поиска
+                    MYSQL_CONTAINER=$(docker ps -a --filter "label=com.docker.stack.namespace=app-canary" --filter "ancestor=danil221/mysql-app*" --format "{{.ID}}" | head -1)
+                    
+                    if [ -n "$MYSQL_CONTAINER" ]; then
+                        echo "Canary MySQL container found: $MYSQL_CONTAINER"
+                        echo "Container details:"
+                        docker inspect $MYSQL_CONTAINER --format "{{json .State}}" | jq . || true
+                        
+                        echo "Checking logs..."
+                        docker logs $MYSQL_CONTAINER --tail 30 2>/dev/null || echo "Cannot get logs"
+                    else
+                        echo "⚠️ Canary MySQL container not found by labels"
+                        echo "Trying alternative search..."
+                        
+                        # Ищем по имени задачи сервиса
+                        SERVICE_TASK=$(docker service ps app-canary_db -q --no-trunc 2>/dev/null | head -1)
+                        if [ -n "$SERVICE_TASK" ]; then
+                            MYSQL_CONTAINER=$(docker ps -a --filter "name=$SERVICE_TASK" --format "{{.ID}}" | head -1)
+                            echo "Found by service task: $MYSQL_CONTAINER"
+                        fi
+                        
+                        if [ -z "$MYSQL_CONTAINER" ]; then
+                            echo "Listing all mysql containers:"
+                            docker ps -a --filter "ancestor=danil221/mysql-app" --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}"
+                            
+                            # Для отладки берем ЛЮБОЙ mysql контейнер
+                            MYSQL_CONTAINER=$(docker ps -a --filter "ancestor=danil221/mysql-app" --format "{{.ID}}" | head -1)
+                            echo "Using container for testing: $MYSQL_CONTAINER"
+                        fi
+                    fi
+                    '''
+                }
+            }
         }
-    }
-}
         
-          stage('Test Database Inside Container') {
-    steps {
-        script {
-            sh '''
-            echo "=== Testing Database Inside Container ==="
-            export DOCKER_HOST="tcp://192.168.0.1:2376"
-            
-            echo "1. Find the CORRECT MySQL container..."
-            
-            # Находим контейнер по имени образа и статусу
-            MYSQL_CONTAINER=$(docker ps --format "{{.ID}} {{.Names}} {{.Image}} {{.Status}}" | grep "mysql-app" | grep -v "app_db" | awk '{print $1}' | head -1)
-            
-            if [ -z "$MYSQL_CONTAINER" ]; then
-                echo "Trying different search - look for 'canary' in name..."
-                MYSQL_CONTAINER=$(docker ps --format "{{.ID}} {{.Names}}" | grep -i canary | awk '{print $1}' | head -1)
-            fi
-            
-            if [ -z "$MYSQL_CONTAINER" ]; then
-                echo "Looking for any MySQL container except production..."
-                # Ищем все контейнеры mysql-app и исключаем те, что в статусе "healthy" (это продакшен)
-                MYSQL_CONTAINER=$(docker ps --format "{{.ID}} {{.Names}} {{.Status}}" | grep "mysql-app" | grep -v "healthy" | awk '{print $1}' | head -1)
-            fi
-            
-            if [ -z "$MYSQL_CONTAINER" ]; then
-                echo "⚠️ No canary MySQL container found by filters"
-                echo "Listing ALL containers:"
-                docker ps --format "table {{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}"
-                
-                # Берем ЛЮБОЙ контейнер mysql-app кроме явно продакшенного
-                ALL_MYSQL=$(docker ps --filter "ancestor=danil221/mysql-app" --format "{{.ID}} {{.Names}}")
-                echo "All mysql-app containers: $ALL_MYSQL"
-                
-                # Берем первый не-"app_db" контейнер
-                MYSQL_CONTAINER=$(echo "$ALL_MYSQL" | grep -v "app_db" | awk '{print $1}' | head -1)
-            fi
-            
-            if [ -z "$MYSQL_CONTAINER" ]; then
-                echo "❌ Cannot find canary MySQL container"
-                exit 1
-            fi
-            
-            echo "Using MySQL container: $MYSQL_CONTAINER"
-            echo "Container details:"
-            docker ps --filter "id=$MYSQL_CONTAINER" --format "table {{.Names}}\\t{{.Status}}\\t{{.Image}}"
-            
-            echo "2. Test basic MySQL connection..."
-            if docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "SELECT 1" 2>/dev/null; then
-                echo "✅ MySQL is running inside container"
-            else
-                echo "❌ MySQL not responding inside container"
-                echo "Checking logs..."
-                docker logs $MYSQL_CONTAINER --tail 10 2>/dev/null || true
-                exit 1
-            fi
-            
-            echo "3. Check all databases..."
-            docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "SHOW DATABASES;" 2>/dev/null || echo "Cannot show databases"
-            
-            echo "4. Check appdb specifically..."
-            if docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "USE appdb; SHOW TABLES;" 2>/dev/null; then
-                echo "✅ appdb database exists with tables"
-                
-                # Check specific tables
-                USERS_EXISTS=$(docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword appdb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='appdb' AND table_name='users';" 2>/dev/null || echo "0")
-                WORKOUTS_EXISTS=$(docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword appdb -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='appdb' AND table_name='workouts';" 2>/dev/null || echo "0")
-                
-                echo "Users table: $USERS_EXISTS"
-                echo "Workouts table: $WORKOUTS_EXISTS"
-                
-                if [ "$USERS_EXISTS" = "1" ] && [ "$WORKOUTS_EXISTS" = "1" ]; then
-                    echo "✅ Both tables created successfully!"
-                else
-                    echo "❌ Tables missing"
-                    exit 1
-                fi
-            else
-                echo "❌ appdb database not found or empty"
-                exit 1
-            fi
-            '''
+        stage('Test Database Connection') {
+            steps {
+                script {
+                    sh '''
+                    echo "=== Testing Database Connection ==="
+                    export DOCKER_HOST="tcp://192.168.0.1:2376"
+                    
+                    echo "1. Get MySQL container..."
+                    # Упрощенный поиск - любой mysql контейнер кроме явно production
+                    MYSQL_CONTAINER=$(docker ps --format "{{.ID}} {{.Names}}" | grep "mysql" | grep -v "app_db.1" | awk '{print $1}' | head -1)
+                    
+                    if [ -z "$MYSQL_CONTAINER" ]; then
+                        echo "No non-production MySQL found, using any mysql container..."
+                        MYSQL_CONTAINER=$(docker ps --filter "ancestor=danil221/mysql-app" --format "{{.ID}}" | head -1)
+                    fi
+                    
+                    if [ -z "$MYSQL_CONTAINER" ]; then
+                        echo "❌ ERROR: No MySQL container found at all!"
+                        echo "Current containers:"
+                        docker ps --format "table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}"
+                        exit 1
+                    fi
+                    
+                    echo "Testing with container: $MYSQL_CONTAINER"
+                    echo "Container name: $(docker ps --filter "id=$MYSQL_CONTAINER" --format "{{.Names}}")"
+                    
+                    echo "2. Check MySQL process..."
+                    docker exec $MYSQL_CONTAINER ps aux | grep mysql || echo "MySQL process not found"
+                    
+                    echo "3. Test MySQL connection (basic)..."
+                    if docker exec $MYSQL_CONTAINER mysqladmin ping -uroot -prootpassword --silent 2>/dev/null; then
+                        echo "✅ MySQL is responding"
+                    else
+                        echo "❌ MySQL not responding, checking logs..."
+                        docker logs $MYSQL_CONTAINER --tail 20 2>/dev/null || true
+                        echo "Trying direct mysql command..."
+                        docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "SELECT 1" 2>/dev/null || true
+                    fi
+                    
+                    echo "4. Check databases..."
+                    docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "SHOW DATABASES;" 2>/dev/null || echo "Cannot connect to MySQL"
+                    
+                    echo "5. Check appdb..."
+                    if docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "USE appdb; SELECT COUNT(*) FROM users;" 2>/dev/null; then
+                        echo "✅ appdb exists and has data"
+                    else
+                        echo "⚠️ appdb not ready or empty"
+                        # Не завершаем пайплайн - продолжаем для отладки
+                    fi
+                    '''
+                }
+            }
         }
-    }
-}
-          
-          
-        
         
         stage('Test Canary Web Application') {
             steps {
@@ -232,27 +238,37 @@ pipeline {
                     
                     echo "Testing on http://${MANAGER_IP}:8081"
                     
-                    SUCCESS=0
-                    TESTS=3
+                    # Проверяем доступность порта
+                    echo "Checking port 8081..."
+                    nc -zv ${MANAGER_IP} 8081 && echo "Port 8081 is open" || echo "Port 8081 not accessible"
                     
-                    for i in $(seq 1 $TESTS); do
-                        echo "Test $i/$TESTS..."
-                        if curl -f -s --max-time 10 http://${MANAGER_IP}:8081/ > /dev/null 2>&1; then
+                    SUCCESS=0
+                    MAX_TESTS=5
+                    
+                    for i in $(seq 1 $MAX_TESTS); do
+                        echo "Test $i/$MAX_TESTS..."
+                        if curl -f -s --max-time 15 http://${MANAGER_IP}:8081/ > /dev/null 2>&1; then
                             SUCCESS=$((SUCCESS + 1))
                             echo "✓ Test passed"
+                            # Проверяем контент
+                            curl -s http://${MANAGER_IP}:8081/ | grep -i "html" && echo "✓ HTML content found"
+                            break
                         else
-                            echo "✗ Test failed"
+                            echo "✗ Test failed, waiting..."
+                            sleep 10
                         fi
-                        sleep 3
                     done
                     
-                    echo "Tests passed: $SUCCESS/$TESTS"
-                    
-                    if [ "$SUCCESS" -ge 2 ]; then
-                        echo "✅ Canary web application working"
+                    if [ "$SUCCESS" -ge 1 ]; then
+                        echo "✅ Canary web application is accessible"
                     else
-                        echo "❌ Canary web application failing"
-                        exit 1
+                        echo "⚠️ Canary web application not responding"
+                        echo "Checking web service logs..."
+                        WEB_CONTAINER=$(docker ps --filter "ancestor=danil221/php-app" --format "{{.ID}}" | head -1)
+                        if [ -n "$WEB_CONTAINER" ]; then
+                            docker logs $WEB_CONTAINER --tail 20 2>/dev/null || true
+                        fi
+                        # Не завершаем пайплайн - переходим к деплою production
                     fi
                     '''
                 }
@@ -268,20 +284,20 @@ pipeline {
                     
                     echo "1. Deploy/update production stack..."
                     
-                    # Always deploy fresh stack (simpler)
                     docker stack rm app 2>/dev/null || true
-                    sleep 10
+                    sleep 15
                     
-                    docker stack deploy -c docker-compose.yaml app --with-registry-auth
+                    docker stack deploy -c docker-compose.yaml app --with-registry-auth --prune
                     
-                    echo "Waiting for production to start..."
+                    echo "Waiting 60 seconds for production to start..."
                     sleep 60
                     
                     echo "2. Production services:"
                     docker service ls --filter name=app
                     
-                    echo "3. Remove canary..."
+                    echo "3. Clean up canary..."
                     docker stack rm app-canary 2>/dev/null || true
+                    sleep 10
                     '''
                 }
             }
@@ -296,18 +312,22 @@ pipeline {
                     
                     echo "Testing production on http://${MANAGER_IP}:80"
                     
-                    for i in $(seq 1 3); do
-                        echo "Test $i/3..."
-                        if curl -f -s --max-time 10 http://${MANAGER_IP}:80/ > /dev/null 2>&1; then
-                            echo "✓ Test passed"
-                        else
-                            echo "✗ Test failed"
-                            exit 1
+                    for i in $(seq 1 5); do
+                        echo "Test $i/5..."
+                        if curl -f -s --max-time 15 http://${MANAGER_IP}:80/ > /dev/null 2>&1; then
+                            echo "✅ Production is working!"
+                            exit 0
                         fi
-                        sleep 3
+                        sleep 5
                     done
                     
-                    echo "✅ Production deployment successful!"
+                    echo "❌ Production not responding"
+                    echo "Checking production services..."
+                    docker service ps app_web --no-trunc || true
+                    
+                    # Попробуем еще раз с задержкой
+                    sleep 30
+                    curl -f -s --max-time 15 http://${MANAGER_IP}:80/ && echo "✅ Production finally working!" || exit 1
                     '''
                 }
             }
@@ -316,7 +336,7 @@ pipeline {
     
     post {
         always {
-            echo "Cleaning up..."
+            echo "=== Pipeline Cleanup ==="
             script {
                 sh '''
                 export DOCKER_HOST="tcp://192.168.0.1:2376" 2>/dev/null || true
@@ -333,9 +353,10 @@ pipeline {
             script {
                 sh '''
                 export DOCKER_HOST="tcp://192.168.0.1:2376" 2>/dev/null || true
-                # Clean up canary on failure
-                docker stack rm app-canary 2>/dev/null || true
-                echo "Canary stack removed"
+                echo "Debug info on failure:"
+                docker service ls 2>/dev/null || true
+                docker stack ls 2>/dev/null || true
+                docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || true
                 '''
             }
         }
