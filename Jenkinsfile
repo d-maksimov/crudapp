@@ -92,38 +92,27 @@ pipeline {
             }
         }
 
-       stage('Deploy Canary') {
-    steps {
-        script {
-            sh '''
-                echo "=== РАЗВЕРТЫВАНИЕ CANARY ==="
-                export DOCKER_HOST="tcp://192.168.0.1:2376"
-                
-                echo "1. Очистка предыдущего canary..."
-                docker stack rm app-canary 2>/dev/null || true
-                sleep 15
-                
-                echo "2. Очистка volume'ов MySQL..."
-                docker volume rm app-canary_canary_mysql_data 2>/dev/null || true
-                
-                echo "3. Используем порт 3307 для canary MySQL..."
-                CANARY_DB_PORT="3307"
-                
-                echo "4. Подготовка docker-compose для canary..."
-                cp docker-compose_canary.yaml docker-compose_canary_temp.yaml
-                
-                # Заменяем переменные в файле
-                sed -i "s/\\\${BUILD_NUMBER}/${BUILD_NUMBER}/g" docker-compose_canary_temp.yaml
-                sed -i "s/\\\${DOCKER_HUB_USER}/${DOCKER_HUB_USER}/g" docker-compose_canary_temp.yaml
-                sed -i "s/3306:3306/${CANARY_DB_PORT}:3306/g" docker-compose_canary_temp.yaml
-                
-                echo "4.1 Добавляем constraint для запуска canary MySQL на worker1..."
-                
-                # Нужно добавить placement constraints в СУЩЕСТВУЮЩУЮ deploy секцию для db
-                # Находим строку с "deploy:" для сервиса db и добавляем placement после нее
-                
-                # Создаем временный файл с правильной структурой
-                cat > docker-compose_canary_fixed.yaml << 'EOF'
+        stage('Deploy Canary') {
+            steps {
+                script {
+                    sh '''
+                        echo "=== РАЗВЕРТЫВАНИЕ CANARY ==="
+                        export DOCKER_HOST="tcp://192.168.0.1:2376"
+                        
+                        echo "1. Очистка предыдущего canary..."
+                        docker stack rm app-canary 2>/dev/null || true
+                        sleep 15
+                        
+                        echo "2. Очистка volume'ов MySQL..."
+                        docker volume rm app-canary_canary_mysql_data 2>/dev/null || true
+                        
+                        echo "3. Используем порт 3307 для canary MySQL..."
+                        CANARY_DB_PORT="3307"
+                        
+                        echo "4. Подготовка docker-compose для canary..."
+                        
+                        # Создаем файл с правильными constraints
+                        cat > docker-compose_canary_temp.yaml << 'EOF'
 version: '3.8'
 
 services:
@@ -182,56 +171,53 @@ volumes:
   canary_mysql_data:
     driver: local
 EOF
-                
-                # Заменяем переменные в новом файле
-                sed -i "s/\\\${BUILD_NUMBER}/${BUILD_NUMBER}/g" docker-compose_canary_fixed.yaml
-                sed -i "s/\\\${DOCKER_HUB_USER}/${DOCKER_HUB_USER}/g" docker-compose_canary_fixed.yaml
-                sed -i "s/\\\${CANARY_DB_PORT}/${CANARY_DB_PORT}/g" docker-compose_canary_fixed.yaml
-                
-                echo "Проверяем созданный файл..."
-                echo "=== Начало файла ==="
-                head -40 docker-compose_canary_fixed.yaml
-                echo "=== Конец файла ==="
-                
-                # Используем исправленный файл
-                mv docker-compose_canary_fixed.yaml docker-compose_canary_temp.yaml
-                
-                echo "5. Развертывание canary стека..."
-                docker stack deploy -c docker-compose_canary_temp.yaml app-canary --with-registry-auth
-                
-                echo "6. Ожидание запуска canary сервисов..."
-                TIMEOUT=180
-                START_TIME=$(date +%s)
-                
-                while true; do
-                    CURRENT_TIME=$(date +%s)
-                    ELAPSED=$((CURRENT_TIME - START_TIME))
-                    
-                    if [ $ELAPSED -ge $TIMEOUT ]; then
-                        echo "⚠️  Таймаут ожидания запуска canary..."
-                        break
-                    fi
-                    
-                    DB_STATUS=$(docker service ls --filter name=app-canary_db --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
-                    WEB_STATUS=$(docker service ls --filter name=app-canary_web-server --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
-                    
-                    echo "   DB: ${DB_STATUS}, Web: ${WEB_STATUS} (прошло ${ELAPSED} сек)"
-                    
-                    # Если web запущен, продолжаем
-                    if echo "${WEB_STATUS}" | grep -q "1/1"; then
-                        echo "✅ Web сервер запущен"
-                        break
-                    fi
-                    
-                    sleep 10
-                done
-                
-                echo "✅ Canary развернут"
-                docker service ls --filter name=app-canary
-            '''
+                        
+                        # Заменяем переменные
+                        sed -i "s/\\\${BUILD_NUMBER}/${BUILD_NUMBER}/g" docker-compose_canary_temp.yaml
+                        sed -i "s/\\\${DOCKER_HUB_USER}/${DOCKER_HUB_USER}/g" docker-compose_canary_temp.yaml
+                        sed -i "s/\\\${CANARY_DB_PORT}/${CANARY_DB_PORT}/g" docker-compose_canary_temp.yaml
+                        
+                        echo "Проверяем созданный файл..."
+                        echo "=== Начало файла ==="
+                        head -40 docker-compose_canary_temp.yaml
+                        echo "=== Конец файла ==="
+                        
+                        echo "5. Развертывание canary стека..."
+                        docker stack deploy -c docker-compose_canary_temp.yaml app-canary --with-registry-auth
+                        
+                        echo "6. Ожидание запуска canary сервисов..."
+                        TIMEOUT=180
+                        START_TIME=$(date +%s)
+                        
+                        while true; do
+                            CURRENT_TIME=$(date +%s)
+                            ELAPSED=$((CURRENT_TIME - START_TIME))
+                            
+                            if [ $ELAPSED -ge $TIMEOUT ]; then
+                                echo "⚠️  Таймаут ожидания запуска canary..."
+                                break
+                            fi
+                            
+                            DB_STATUS=$(docker service ls --filter name=app-canary_db --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
+                            WEB_STATUS=$(docker service ls --filter name=app-canary_web-server --format "{{.Replicas}}" 2>/dev/null || echo "0/0")
+                            
+                            echo "   DB: ${DB_STATUS}, Web: ${WEB_STATUS} (прошло ${ELAPSED} сек)"
+                            
+                            # Если web запущен, продолжаем
+                            if echo "${WEB_STATUS}" | grep -q "1/1"; then
+                                echo "✅ Web сервер запущен"
+                                break
+                            fi
+                            
+                            sleep 10
+                        done
+                        
+                        echo "✅ Canary развернут"
+                        docker service ls --filter name=app-canary
+                    '''
+                }
+            }
         }
-    }
-}
 
         stage('Canary Database Check') {
             steps {
@@ -358,11 +344,11 @@ EOF
                             
                             # Шаг 1: Обновляем первую реплику
                             echo "Шаг 1: Обновляем 1-ю реплику продакшена"
-                            docker service update \
-                                --image ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:${BUILD_NUMBER} \
-                                --update-parallelism 1 \
-                                --update-delay 20s \
-                                --with-registry-auth \
+                            docker service update \\
+                                --image ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:${BUILD_NUMBER} \\
+                                --update-parallelism 1 \\
+                                --update-delay 20s \\
+                                --with-registry-auth \\
                                 ${APP_NAME}_web
                             
                             echo "Ожидание стабилизации..."
@@ -385,11 +371,11 @@ EOF
                             
                             # Шаг 2: Обновляем оставшиеся реплики
                             echo "Шаг 2: Обновляем оставшиеся реплики"
-                            docker service update \
-                                --image ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:${BUILD_NUMBER} \
-                                --update-parallelism 1 \
-                                --update-delay 30s \
-                                --with-registry-auth \
+                            docker service update \\
+                                --image ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:${BUILD_NUMBER} \\
+                                --update-parallelism 1 \\
+                                --update-delay 30s \\
+                                --with-registry-auth \\
                                 ${APP_NAME}_web
                             
                             echo "Ожидание завершения..."
@@ -397,9 +383,9 @@ EOF
                             
                             # Обновляем базу данных если нужно
                             echo "Обновление базы данных до latest..."
-                            docker service update \
-                                --image ${DOCKER_HUB_USER}/${DATABASE_IMAGE_NAME}:latest \
-                                --with-registry-auth \
+                            docker service update \\
+                                --image ${DOCKER_HUB_USER}/${DATABASE_IMAGE_NAME}:latest \\
+                                --with-registry-auth \\
                                 ${APP_NAME}_db 2>/dev/null || echo "БД уже обновлена"
                             
                             # Удаляем canary
@@ -422,13 +408,54 @@ EOF
             steps {
                 script {
                     sh '''
-                        echo "=== СТРОГАЯ ПРОВЕРКА PRODUCTION БАЗЫ ДАННЫХ ==="
+                        echo "=== СТРОГАЯ ПРОВЕРКА И ИНИЦИАЛИЗАЦИЯ PRODUCTION БАЗЫ ДАННЫХ ==="
                         export DOCKER_HOST="tcp://192.168.0.1:2376"
                         
-                        echo "1. Ожидание стабилизации БД..."
-                        sleep 30
+                        echo "1. Ожидание запуска MySQL..."
+                        MYSQL_READY=0
+                        for i in {1..30}; do
+                            if docker run --rm --network ${APP_NAME}_default mysql:8.0 \\
+                               mysqladmin -h ${APP_NAME}_db -u root -prootpassword ping 2>/dev/null | grep -q "mysqld is alive"; then
+                                MYSQL_READY=1
+                                echo "   ✅ MySQL доступен"
+                                break
+                            fi
+                            echo "   ⏳ Ожидание MySQL... ($i/30)"
+                            sleep 5
+                        done
                         
-                        echo "2. Проверка таблиц в production БД..."
+                        if [ $MYSQL_READY -eq 0 ]; then
+                            echo "❌ MySQL не доступен после ожидания"
+                            exit 1
+                        fi
+                        
+                        echo "2. Принудительная инициализация БД (создание таблиц если их нет)..."
+                        docker run --rm --network ${APP_NAME}_default mysql:8.0 mysql -h ${APP_NAME}_db -u root -prootpassword << 'EOF'
+CREATE DATABASE IF NOT EXISTS appdb CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE appdb;
+
+CREATE TABLE IF NOT EXISTS users (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    password VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS workouts (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT,
+    workout_date DATE,
+    workout_type VARCHAR(50),
+    duration INT,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+SELECT "Database appdb initialized successfully!" as message;
+EOF
+                        
+                        echo "3. Финальная проверка таблиц в production БД..."
                         
                         # Проверяем таблицы
                         PROD_TABLE_CHECK=$(docker run --rm --network ${APP_NAME}_default mysql:8.0 \\
@@ -448,7 +475,12 @@ EOF
                         else
                             echo "❌ В production БД отсутствуют таблицы!"
                             echo "   Это критическая ошибка - приложение не будет работать корректно"
-                            echo "   Проверьте init.sql и перезапустите БД"
+                            
+                            # Показываем что есть в БД
+                            echo "   Содержимое БД:"
+                            docker run --rm --network ${APP_NAME}_default mysql:8.0 \\
+                                mysql -h ${APP_NAME}_db -u root -prootpassword -e "SHOW DATABASES; USE appdb; SHOW TABLES;" 2>/dev/null || true
+                            
                             exit 1
                         fi
                     '''
@@ -514,9 +546,9 @@ EOF
                 # Если начали обновлять, но не завершили
                 if docker service ls --filter name=${APP_NAME}_web | grep -q ":${BUILD_NUMBER}"; then
                     echo "   Откат production до предыдущей версии..."
-                    docker service update \
-                        --image ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:latest \
-                        --with-registry-auth \
+                    docker service update \\
+                        --image ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:latest \\
+                        --with-registry-auth \\
                         ${APP_NAME}_web
                 fi
                 
