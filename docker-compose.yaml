@@ -13,13 +13,8 @@ services:
     networks:
       - app-network
     command: >
-      --datadir=/var/lib/mysql
-      --innodb-flush-method=O_DIRECT
-      --skip-innodb-doublewrite
-      --innodb-file-per-table=1
-      --innodb-log-file-size=256M
-      --innodb-buffer-pool-size=256M
-      --max_connections=200
+      --default-authentication-plugin=mysql_native_password
+      --bind-address=0.0.0.0
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
       interval: 30s
@@ -35,6 +30,13 @@ services:
 
   web:
     image: danil221/php-app:latest
+    # ВАЖНО: Добавляем переменные окружения для подключения к БД
+    environment:
+      - DB_HOST=db  # Имя сервиса MySQL
+      - DB_PORT=3306
+      - DB_NAME=appdb
+      - DB_USER=user
+      - DB_PASSWORD=userpassword
     ports:
       - "80:80"
     networks:

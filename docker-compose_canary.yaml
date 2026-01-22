@@ -2,37 +2,34 @@ version: '3.8'
 
 services:
   db:
-    image: ${DOCKER_HUB_USER}/mysql-app:${BUILD_NUMBER}
-    command: --default-authentication-plugin=mysql_native_password
+    image: danil221/mysql-app:latest
     environment:
-      - MYSQL_ROOT_PASSWORD=rootpassword
-      - MYSQL_DATABASE=appdb
-      - MYSQL_USER=user
-      - MYSQL_PASSWORD=userpassword
+      MYSQL_DATABASE: appdb
+      MYSQL_USER: user
+      MYSQL_PASSWORD: userpassword
+      MYSQL_ROOT_PASSWORD: rootpassword
     volumes:
       - canary_mysql_data:/var/lib/mysql
+    networks:
+      - canary-network
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --bind-address=0.0.0.0
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 40s
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 90s
     deploy:
       mode: replicated
       replicas: 1
-      # УБИРАЕМ constraint на worker1
-      # placement:
-      #   constraints:
-      #     - node.hostname == worker1
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   web-server:
-    image: ${DOCKER_HUB_USER}/php-app:${BUILD_NUMBER}
+    image: danil221/php-app:latest
+    # ВАЖНО: Добавляем переменные окружения
     environment:
-      - DB_HOST=db
+      - DB_HOST=db  # Или tasks.db для Docker Swarm
       - DB_PORT=3306
       - DB_NAME=appdb
       - DB_USER=user
@@ -40,18 +37,16 @@ services:
       - APP_ENV=canary
     ports:
       - "8081:80"
+    networks:
+      - canary-network
     depends_on:
       - db
     deploy:
       mode: replicated
       replicas: 1
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 3
 
 networks:
-  default:
+  canary-network:
     driver: overlay
     attachable: true
 
