@@ -20,6 +20,10 @@ services:
     deploy:
       mode: replicated
       replicas: 1
+      # УБИРАЕМ constraint на worker1
+      # placement:
+      #   constraints:
+      #     - node.hostname == worker1
       restart_policy:
         condition: on-failure
         delay: 10s
@@ -36,6 +40,8 @@ services:
       - APP_ENV=canary
     ports:
       - "8081:80"
+    depends_on:
+      - db
     deploy:
       mode: replicated
       replicas: 1
