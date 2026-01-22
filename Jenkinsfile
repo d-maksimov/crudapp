@@ -33,6 +33,31 @@ pipeline {
                 }
             }
         }
+        stage('Check Network') {
+    steps {
+        script {
+            sh '''
+            echo "=== CHECKING NETWORK ==="
+            export DOCKER_HOST="tcp://192.168.0.1:2376"
+            
+            echo "1. List all networks:"
+            docker network ls
+            
+            echo "2. Check canary network:"
+            docker network inspect app-canary_canary-network 2>/dev/null || echo "Network not found"
+            
+            echo "3. Check if containers are in network:"
+            docker ps --filter "name=app-canary" --format "table {{.Names}}\\t{{.Networks}}"
+            
+            echo "4. Inspect MySQL container network:"
+            MYSQL_CONTAINER=$(docker ps -q --filter "name=app-canary_db")
+            if [ -n "$MYSQL_CONTAINER" ]; then
+                docker inspect $MYSQL_CONTAINER --format='{{range $net, $settings := .NetworkSettings.Networks}}{{$net}}: {{$settings.IPAddress}}{{"\\n"}}{{end}}'
+            fi
+            '''
+        }
+    }
+}
         
         stage('Push to Docker Hub') {
             steps {
@@ -63,31 +88,39 @@ pipeline {
         }
         
         stage('Deploy Canary') {
-            steps {
-                script {
-                    sh """
-                    echo "=== Deploying Canary ==="
-                    export DOCKER_HOST=tcp://192.168.0.1:2376
-                    
-                    # Remove old stack if exists
-                    docker stack rm app-canary 2>/dev/null || true
-                    sleep 5
-                    
-                    # Deploy new stack
-                    docker stack deploy -c docker-compose_canary.yaml app-canary --with-registry-auth
-                    
-                    echo "Waiting for services to start..."
-                    sleep 60
-                    
-                    echo "Service status:"
-                    docker service ls --filter name=app-canary
-                    
-                    echo "MySQL detailed status:"
-                    docker service ps app-canary_db --no-trunc 2>/dev/null || true
-                    """
-                }
-            }
+    steps {
+        script {
+            sh '''
+            echo "=== Deploying Canary ==="
+            export DOCKER_HOST="tcp://192.168.0.1:2376"
+            
+            # Удаляем старый стек
+            docker stack rm app-canary 2>/dev/null || true
+            sleep 5
+            
+            # Создаем сеть заранее если нужно
+            echo "Creating network if not exists..."
+            docker network create -d overlay --attachable app-canary_network 2>/dev/null || true
+            
+            echo "Network status:"
+            docker network ls | grep canary || true
+            
+            # Деплоим
+            docker stack deploy -c docker-compose_canary.yaml app-canary --with-registry-auth
+            
+            echo "Waiting 30 seconds..."
+            sleep 30
+            
+            echo "Service status:"
+            docker service ls --filter name=app-canary
+            
+            echo "Network inspection:"
+            docker network inspect app-canary_canary-network 2>/dev/null || docker network inspect app-canary_network 2>/dev/null || echo "Cannot inspect network"
+            '''
         }
+    }
+}
+        
         
         stage('Check Database') {
             steps {

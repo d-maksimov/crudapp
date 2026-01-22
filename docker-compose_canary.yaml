@@ -8,8 +8,8 @@ services:
       MYSQL_DATABASE: appdb
     networks:
       - canary-network
-    deploy:
-      replicas: 1
+    ports:
+      - "3306:3306"  # Добавьте порт для отладки
 
   web-server:
     image: danil221/php-app:latest
@@ -24,9 +24,11 @@ services:
       - canary-network
     depends_on:
       - db
-    deploy:
-      replicas: 1
 
 networks:
   canary-network:
     driver: overlay
+    # Добавьте явные настройки
+    attachable: true
+    driver_opts:
+      encrypted: ""
