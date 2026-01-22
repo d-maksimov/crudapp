@@ -8,7 +8,6 @@ pipeline {
     BACKEND_IMAGE_NAME = 'php-app'
     DATABASE_IMAGE_NAME = 'mysql-app'
     MANAGER_IP = '192.168.0.1'
-    // Добавьте эту строку:
     DOCKER_HOST = 'tcp://192.168.0.1:2376'
   }
 
@@ -77,6 +76,45 @@ pipeline {
       }
     }
 
+    stage('Canary Database Check') {
+      steps {
+        script {
+          sh '''
+            echo "=== ПРОВЕРКА ТАБЛИЦ БАЗЫ ДАННЫХ CANARY ==="
+            export DOCKER_HOST="tcp://192.168.0.1:2376"
+            
+            echo "1. Ожидание инициализации MySQL..."
+            sleep 30
+            
+            echo "2. Проверка таблиц users и workouts..."
+            
+            # Проверяем таблицу users
+            USERS_EXISTS=$(docker run --rm --network ${CANARY_APP_NAME}_default mysql:8.0 \\
+              mysql -h db -u root -prootpassword appdb -N -e \\
+              "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'appdb' AND table_name = 'users';" 2>/dev/null || echo "0")
+            
+            # Проверяем таблицу workouts
+            WORKOUTS_EXISTS=$(docker run --rm --network ${CANARY_APP_NAME}_default mysql:8.0 \\
+              mysql -h db -u root -prootpassword appdb -N -e \\
+              "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'appdb' AND table_name = 'workouts';" 2>/dev/null || echo "0")
+            
+            echo "   Результат проверки:"
+            echo "   • Таблица 'users': ${USERS_EXISTS} (1 = существует, 0 = нет)"
+            echo "   • Таблица 'workouts': ${WORKOUTS_EXISTS} (1 = существует, 0 = нет)"
+            
+            # КРИТИЧЕСКАЯ ПРОВЕРКА
+            if [ "${USERS_EXISTS}" = "1" ] && [ "${WORKOUTS_EXISTS}" = "1" ]; then
+              echo "✅ ОБЕ таблицы существуют!"
+            else
+              echo "❌ КРИТИЧЕСКАЯ ОШИБКА: Не все таблицы созданы!"
+              echo "   Проверьте содержимое init.sql"
+              exit 1
+            fi
+          '''
+        }
+      }
+    }
+
     stage('Canary Testing') {
       steps {
         script {
@@ -121,11 +159,11 @@ pipeline {
 
               # Шаг 1: Обновляем первую реплику продакшена
               echo "Шаг 1: Обновляем 1-ю реплику продакшена"
-              docker service update \
-                --image ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:${BUILD_NUMBER} \
-                --update-parallelism 1 \
-                --update-delay 20s \
-                --detach=true \
+              docker service update \\
+                --image ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:${BUILD_NUMBER} \\
+                --update-parallelism 1 \\
+                --update-delay 20s \\
+                --detach=true \\
                 ${APP_NAME}_web-server
 
               echo "Ожидание стабилизации после первой реплики..."
@@ -152,10 +190,10 @@ pipeline {
 
               # Шаг 2: Обновляем оставшиеся реплики
               echo "Шаг 2: Обновляем оставшиеся реплики"
-              docker service update \
-                --image ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:${BUILD_NUMBER} \
-                --update-parallelism 1 \
-                --update-delay 30s \
+              docker service update \\
+                --image ${DOCKER_HUB_USER}/${BACKEND_IMAGE_NAME}:${BUILD_NUMBER} \\
+                --update-parallelism 1 \\
+                --update-delay 30s \\
                 ${APP_NAME}_web-server
 
               echo "Ожидание завершения полного обновления..."
