@@ -23,7 +23,21 @@ CREATE TABLE IF NOT EXISTS workouts (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 
- 
+ -- ВАЖНО: СОЗДАЕМ ПОЛЬЗОВАТЕЛЯ И ДАЕМ ПРАВА
+-- Удаляем пользователя если существует (для чистоты)
+DROP USER IF EXISTS 'user'@'%';
+-- Создаем пользователя с доступом с любого хоста
+CREATE USER 'user'@'%' IDENTIFIED BY 'userpassword';
+-- Даем все права на базу appdb
+GRANT ALL PRIVILEGES ON appdb.* TO 'user'@'%';
+
+-- Также создаем пользователя root с доступом с любого хоста (для отладки)
+DROP USER IF EXISTS 'root'@'%';
+CREATE USER 'root'@'%' IDENTIFIED BY 'rootpassword';
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
+
+-- Применяем изменения прав
+FLUSH PRIVILEGES;
 
 
 
