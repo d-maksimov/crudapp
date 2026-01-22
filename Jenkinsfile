@@ -220,48 +220,33 @@ pipeline {
         }
         
         stage('Deploy to Production') {
-            steps {
-                script {
-                    sh """
-                    echo "=== Deploying to Production ==="
-                    export DOCKER_HOST=tcp://192.168.0.1:2376
-                    
-                    # Check if production exists
-                    if docker stack ls | grep -q app; then
-                        echo "Updating production stack..."
-                        
-                        # Update PHP service
-                        docker service update \\
-                            --image ${DOCKER_HUB_USER}/php-app:${BUILD_TAG} \\
-                            --update-parallelism 1 \\
-                            --update-delay 30s \\
-                            app_web-server
-                        
-                        # Update MySQL service if needed
-                        docker service update \\
-                            --image ${DOCKER_HUB_USER}/mysql-app:${BUILD_TAG} \\
-                            --update-parallelism 1 \\
-                            --update-delay 30s \\
-                            app_db 2>/dev/null || true
-                        
-                        echo "Waiting for update to complete..."
-                        sleep 60
-                        
-                        echo "Production services:"
-                        docker service ls --filter name=app
-                    else
-                        echo "Deploying new production stack..."
-                        docker stack deploy -c docker-compose.yaml app --with-registry-auth
-                        sleep 60
-                    fi
-                    
-                    # Remove canary
-                    echo "Removing canary stack..."
-                    docker stack rm app-canary 2>/dev/null || true
-                    """
-                }
-            }
+    steps {
+        script {
+            sh '''
+            echo "=== Deploying Production Stack ==="
+            export DOCKER_HOST="tcp://192.168.0.1:2376"
+            
+            # Удаляем старый стек если есть
+            docker stack rm app 2>/dev/null || true
+            sleep 10
+            
+            # Разворачиваем новый стек
+            echo "Deploying new production stack..."
+            docker stack deploy -c docker-compose.yaml app --with-registry-auth
+            
+            echo "Waiting for production to start..."
+            sleep 90
+            
+            echo "Production services:"
+            docker service ls --filter name=app
+            
+            # Удаляем canary
+            echo "Removing canary stack..."
+            docker stack rm app-canary 2>/dev/null || true
+            '''
         }
+    }
+}
         
         stage('Final Verification') {
             steps {
