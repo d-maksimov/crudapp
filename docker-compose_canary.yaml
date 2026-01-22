@@ -4,36 +4,20 @@ services:
   db:
     image: danil221/mysql-app:latest
     environment:
-      MYSQL_DATABASE: appdb
-      MYSQL_USER: user
-      MYSQL_PASSWORD: userpassword
       MYSQL_ROOT_PASSWORD: rootpassword
-    
+      MYSQL_DATABASE: appdb
     networks:
       - canary-network
-    command: >
-      --default-authentication-plugin=mysql_native_password
-      --bind-address=0.0.0.0
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
-      interval: 30s
-      timeout: 15s
-      retries: 5
-      start_period: 90s
     deploy:
-      mode: replicated
       replicas: 1
 
   web-server:
     image: danil221/php-app:latest
-    # ВАЖНО: Добавляем переменные окружения
     environment:
-      - DB_HOST=db  # Или tasks.db для Docker Swarm
-      - DB_PORT=3306
+      - DB_HOST=db
       - DB_NAME=appdb
-      - DB_USER=user
-      - DB_PASSWORD=userpassword
-      - APP_ENV=canary
+      - DB_USER=root
+      - DB_PASS=rootpassword
     ports:
       - "8081:80"
     networks:
@@ -41,14 +25,8 @@ services:
     depends_on:
       - db
     deploy:
-      mode: replicated
       replicas: 1
 
 networks:
   canary-network:
     driver: overlay
-    attachable: true
-
-volumes:
-  canary_mysql_data:
-    driver: local
