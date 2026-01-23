@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS users (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Таблица тренировок
- CREATE TABLE IF NOT EXISTS workouts (
+/* CREATE TABLE IF NOT EXISTS workouts (
     id INT PRIMARY KEY AUTO_INCREMENT,
     user_id INT,
     workout_date DATE,
@@ -22,4 +22,4 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
+*/
