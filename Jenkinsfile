@@ -88,7 +88,7 @@ pipeline {
                     sleep 90
                     
                     echo "Canary services status:"
-                    docker service ls --filter name=app-canary --format "table {{.Name}}\\t{{.Replicas}}\\t{{.Image}}\\t{{.Ports}}"
+                    docker service ls --filter name=app-canary --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}\t{{.Ports}}"
                     
                     echo "Detailed service tasks:"
                     echo "MySQL service:"
@@ -124,7 +124,7 @@ pipeline {
                     
                     if [ -z "$MYSQL_CONTAINER" ]; then
                         echo "⚠️ Cannot find canary MySQL container, checking all MySQL containers..."
-                        docker ps --filter "ancestor=danil221/mysql-app" --format "table {{.Names}}\\t{{.Status}}"
+                        docker ps --filter "ancestor=danil221/mysql-app" --format "table {{.Names}}\t{{.Status}}"
                         exit 1
                     fi
                     
@@ -224,7 +224,7 @@ pipeline {
                             
                             # Проверяем что приложение может подключиться к базе
                             echo "Testing database connectivity from web app..."
-                            if curl -s http://${MANAGER_IP}:8081/ | grep -i "error\|exception\|failed" > /dev/null 2>&1; then
+                            if curl -s http://${MANAGER_IP}:8081/ | grep -i "error" > /dev/null 2>&1 || curl -s http://${MANAGER_IP}:8081/ | grep -i "exception" > /dev/null 2>&1 || curl -s http://${MANAGER_IP}:8081/ | grep -i "failed" > /dev/null 2>&1; then
                                 echo "⚠️ Possible errors in web application"
                             else
                                 echo "✅ Web app appears healthy"
@@ -292,7 +292,7 @@ pipeline {
                     
                     if [ -z "$MYSQL_CONTAINER" ]; then
                         echo "⚠️ Cannot find production MySQL container"
-                        docker ps --filter "ancestor=danil221/mysql-app" --format "table {{.Names}}\\t{{.Status}}"
+                        docker ps --filter "ancestor=danil221/mysql-app" --format "table {{.Names}}\t{{.Status}}"
                         exit 1
                     fi
                     
@@ -388,10 +388,10 @@ pipeline {
                     docker stack ls
                     
                     echo "2. All services:"
-                    docker service ls --format "table {{.Name}}\\t{{.Replicas}}\\t{{.Image}}\\t{{.Ports}}"
+                    docker service ls --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}\t{{.Ports}}"
                     
                     echo "3. Production containers:"
-                    docker ps --filter "name=app_" --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" | head -10
+                    docker ps --filter "name=app_" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | head -10
                     
                     echo "✅ Deployment completed successfully!"
                     '''
@@ -427,7 +427,7 @@ pipeline {
                 docker service ls 2>/dev/null || true
                 echo ""
                 echo "Failed service tasks:"
-                docker service ps --filter "desired-state=running" --format "{{.Name}}\\t{{.CurrentState}}" | grep -v Running 2>/dev/null || true
+                docker service ps --filter "desired-state=running" --format "{{.Name}}\t{{.CurrentState}}" | grep -v Running 2>/dev/null || true
                 '''
             }
         }
