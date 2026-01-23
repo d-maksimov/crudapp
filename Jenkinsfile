@@ -183,13 +183,13 @@ pipeline {
                             echo "Workouts count: $WORKOUTS_COUNT"
                             
                         else
-                            echo "❌ Required tables missing!"
+                            echo "❌ Отсутствуют необходимые таблицы!"
                             echo "Expected tables: users, workouts"
                             echo "Found tables: $TABLES"
                             exit 1
                         fi
                     else
-                        echo "❌ No tables found in appdb!"
+                        echo "❌ В базе данных appdb не найдено ни одной таблицы!"
                         exit 1
                     fi
                     
