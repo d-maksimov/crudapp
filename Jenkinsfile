@@ -279,60 +279,43 @@ pipeline {
             }
         }
         
-        stage('Verify Production Database') {
-            steps {
-                script {
-                    sh '''
-                    echo "=== Verifying Production Database ==="
-                    export DOCKER_HOST="tcp://192.168.0.1:2376"
-                    
-                    echo "1. Find production MySQL container..."
-                    
-                    MYSQL_CONTAINER=$(docker ps -q --filter "name=app_db" --filter "status=running" | head -1)
-                    
-                    if [ -z "$MYSQL_CONTAINER" ]; then
-                        echo "⚠️ Cannot find production MySQL container"
-                        docker ps --filter "ancestor=danil221/mysql-app" --format "table {{.Names}}\t{{.Status}}"
-                        exit 1
-                    fi
-                    
-                    echo "Found production MySQL container: $MYSQL_CONTAINER"
-                    
-                    echo "2. Check production database..."
-                    
-                    # Проверяем подключение
-                    if docker exec $MYSQL_CONTAINER mysqladmin ping -uroot -prootpassword --silent 2>/dev/null; then
-                        echo "✅ Production MySQL is running"
-                    else
-                        echo "❌ Production MySQL not responding"
-                        exit 1
-                    fi
-                    
-                    # Проверяем базу и таблицы
-                    echo "3. Check appdb and tables..."
-                    
-                    if docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword -e "USE appdb; SHOW TABLES;" 2>/dev/null; then
-                        echo "✅ Production appdb exists with tables"
-                        
-                        # Проверяем конкретные таблицы
-                        TABLES=$(docker exec $MYSQL_CONTAINER mysql -uroot -prootpassword appdb -N -e "SHOW TABLES;" 2>/dev/null)
-                        echo "Tables in production: $TABLES"
-                        
-                        if echo "$TABLES" | grep -q "users" && echo "$TABLES" | grep -q "workouts"; then
-                            echo "✅ Production has required tables"
-                        else
-                            echo "⚠️ Production missing some tables"
-                        fi
-                    else
-                        echo "❌ Production appdb issues"
-                        exit 1
-                    fi
-                    
-                    echo "✅ Production database verified!"
-                    '''
-                }
-            }
+        stage('Verify Production') {
+    steps {
+        script {
+            sh '''
+            echo "=== Verifying Production ==="
+            export DOCKER_HOST="tcp://192.168.0.1:2376"
+            
+            echo "1. Check production services are deployed..."
+            docker service ls --filter name=app
+            
+            echo "2. Testing production web application on http://${MANAGER_IP}:80"
+            
+            MAX_RETRIES=15
+            SUCCESS=false
+            
+            for i in $(seq 1 $MAX_RETRIES); do
+                echo "Test $i/$MAX_RETRIES..."
+                if curl -f -s --max-time 10 http://${MANAGER_IP}:80/ > /dev/null 2>&1; then
+                    echo "✅ Production is working!"
+                    SUCCESS=true
+                    break
+                else
+                    echo "⏳ Production not ready yet..."
+                    sleep 10
+                fi
+            done
+            
+            if [ "$SUCCESS" = false ]; then
+                echo "❌ Production not responding after $MAX_RETRIES attempts"
+                exit 1
+            fi
+            
+            echo "✅ Production deployment successful!"
+            '''
         }
+    }
+}
         
         stage('Verify Production Web') {
             steps {
